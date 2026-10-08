@@ -29,8 +29,9 @@ pub struct Config {
 fn input_bytes() -> usize {
     100 * 1024 * 1024
 }
+// 与 OSS 静态像素/动图累计像素上限一致；解码进程的内存和时间限制仍独立生效。
 fn input_pixels() -> u64 {
-    24_000_000
+    250_000_000
 }
 fn workers() -> usize {
     2
@@ -62,7 +63,7 @@ impl Config {
         if !(1..=4).contains(&self.max_concurrent)
             || !(1..=60).contains(&self.fetch_timeout_seconds)
             || !(1..=100 * 1024 * 1024).contains(&self.max_input_bytes)
-            || !(1..=40_000_000).contains(&self.max_input_pixels)
+            || !(1..=250_000_000).contains(&self.max_input_pixels)
         {
             return Err("资源限制超出范围");
         }

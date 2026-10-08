@@ -44,7 +44,7 @@ fn config(upstream: &str) -> Config {
             path_prefix: "/bucket/".into(),
         }],
         max_input_bytes: 100 * 1024 * 1024,
-        max_input_pixels: 24_000_000,
+        max_input_pixels: 250_000_000,
         max_concurrent: 2,
         fetch_timeout_seconds: 1,
     }
@@ -483,4 +483,34 @@ async fn cors_and_input_errors_have_stable_responses() {
     assert!(uuid::Uuid::parse_str(id).is_ok());
     let json: serde_json::Value = serde_json::from_slice(&body(response).await).unwrap();
     assert_eq!(json["error"]["code"], "invalid_parameters");
+}
+
+#[test]
+fn high_resolution_photo_uses_oss_pixel_admission_without_removing_budget() {
+    // 迁入真实相机照片包含8192×5464；旧2400万默认预算会拒绝其缩略图。
+    let c: Config = toml::from_str(include_str!("../config.example.toml")).unwrap();
+    c.validate().unwrap();
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::new_rgb8(8192, 5464)
+        .write_to(&mut encoded, ImageFormat::Jpeg)
+        .unwrap();
+    let params = parameters("w=320&h=240&r=2&f=webp");
+    assert_eq!(
+        transform::transform(encoded.get_ref(), &params, 24_000_000)
+            .err()
+            .unwrap()
+            .1,
+        "source_pixel_limit"
+    );
+    let output = transform::transform(encoded.get_ref(), &params, c.max_input_pixels).unwrap();
+    assert_eq!((output.width, output.height), (320, 240));
+    assert_eq!(image::load_from_memory(&output.bytes).unwrap().width(), 320);
+    let defaults: Config = toml::from_str(
+        &include_str!("../config.example.toml").replace("max_input_pixels = 250000000\n", ""),
+    )
+    .unwrap();
+    assert_eq!(defaults.max_input_pixels, c.max_input_pixels);
+    let mut invalid = c;
+    invalid.max_input_pixels = 250_000_001;
+    assert!(invalid.validate().is_err());
 }

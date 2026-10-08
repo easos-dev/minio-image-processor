@@ -1,7 +1,7 @@
 listen = "0.0.0.0:8080"
 allowed_origins = ["http://127.0.0.1:18080"]
 max_input_bytes = 104857600
-max_input_pixels = 24000000
+max_input_pixels = 250000000
 max_concurrent = 2
 fetch_timeout_seconds = 20
 

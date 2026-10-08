@@ -68,7 +68,7 @@ def prepare(base, public_host, bucket, origins, minio_secrets, network):
     write(generated / 'config.toml', f'''listen = "0.0.0.0:8080"
 allowed_origins = {json.dumps(origins)}
 max_input_bytes = 104857600
-max_input_pixels = 24000000
+max_input_pixels = 250000000
 max_concurrent = 2
 fetch_timeout_seconds = 20
 [[sources]]
