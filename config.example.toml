@@ -7,7 +7,7 @@ fetch_timeout_seconds = 20
 
 [[sources]]
 # url 参数必须属于该公开 origin 和桶前缀。
-origin = "https://objects.example.invalid"
+origin = "https://33.79.0.35"
 # 固定受信容器回源；仍使用原始公开 Host，使 SigV4 签名有效。
 upstream = "http://minio:9000"
 path_prefix = "/easos-preview/"

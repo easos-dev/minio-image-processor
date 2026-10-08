@@ -20,12 +20,15 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
   gateway:
-    image: caddy:2.11.2-alpine@sha256:834468128c7696cec0ceea6172f7d692daf645ae51983ca76e39da54a97c570d
-    ports: ["80:80", "443:443"]
+    image: nginx:stable-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    entrypoint: ["nginx", "-g", "daemon off;"]
+    ports: ["443:443", "8443:8443"]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp, /var/cache/nginx]
     volumes:
-      - ./generated/Caddyfile:/etc/caddy/Caddyfile:ro
-      - certificates:/data
-      - gateway-config:/config
+      - ./generated/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./tls:/etc/nginx/tls:ro
     networks: [storage]
     depends_on: [image-processor]
     logging: *safe-logs
@@ -53,6 +56,3 @@ networks:
   storage:
     external: true
     name: ${MINIO_NETWORK:-image-processor-dev}
-volumes:
-  certificates:
-  gateway-config:

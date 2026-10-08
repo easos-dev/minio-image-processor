@@ -12,21 +12,25 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 class PrepareTests(unittest.TestCase):
-    def test_domain_and_origin_reject_injection(self):
-        for value in ['127.0.0.1', 'example.test {', 'https://example.test', 'EXAMPLE.test', 'example.test\nother', 'example.test:9000']:
-            with self.assertRaises(ValueError): module.domain(value)
+    def test_host_and_origin_reject_injection(self):
+        for value in ['example.test {', 'https://example.test', 'EXAMPLE.test', 'example.test\nother', 'example.test:9000']:
+            with self.assertRaises(ValueError): module.host(value)
         for value in ['*', 'https://user:secret@example.test', 'https://example.test/path', 'https://example.test?x=y']:
             with self.assertRaises(ValueError): module.origin(value)
 
     def test_generated_configuration_secrets_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            args = (base, 'objects.example.test', 'images.example.test', 'easos-preview', ['http://127.0.0.1:18080'], '/opt/image-processor-dev/secrets', 'image-processor-dev')
+            args = (base, '33.79.0.35', 'easos-preview', ['http://127.0.0.1:18080'], '/opt/image-processor-dev/secrets', 'image-processor-dev')
             module.prepare(*args)
             conf = tomllib.loads((base/'generated/config.toml').read_text())
             self.assertEqual(conf['sources'][0]['path_prefix'], '/easos-preview/')
             self.assertEqual(conf['allowed_origins'], ['http://127.0.0.1:18080'])
-            tomllib.loads((base/'generated/easos-bucket.example.toml').read_text())
+            bucket = tomllib.loads((base/'generated/easos-bucket.example.toml').read_text())['buckets'][0]
+            self.assertEqual(bucket['image_processor']['host'], '33.79.0.35:8443')
+            self.assertEqual(bucket['download']['host'], '33.79.0.35')
+            self.assertEqual(bucket['server']['host'], '33.79.0.35')
+            self.assertIn('listen 443 ssl;', (base/'generated/nginx.conf').read_text())
             cors = ET.parse(base/'generated/cors.xml')
             self.assertIn('if-none-match', [x.text for x in cors.findall('.//AllowedHeader')])
             policy = json.loads((base/'generated/policy.json').read_text())

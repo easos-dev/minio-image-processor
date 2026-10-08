@@ -1,23 +1,24 @@
-# 开发验收
+# 开发与部署验收
 
-2026-10-08，在独立项目 `/Users/pch18/Codes/git.easit.jp/image-processor` 验证。没有改动 EasOS 源码或 8080 原环境，没有在 Mac 部署 MinIO/图片处理常驻服务。本任务也没有访问或变更已有远端服务器。
+2026-10-08，在独立项目与授权服务器完成以下验证。常驻 MinIO、Nginx 和图片处理均在 `33.79.0.35`，没有在 Mac 新增这些服务。EasOS 修改仅位于独立工作树和 18080 预览。
 
 ## 已通过
 
-- Rust 1.97.1，macOS arm64：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings`、`cargo test --locked`。
-- 12 项 Rust 测试：JPEG/PNG/WebP 编解码及质量、三种缩放、透明白底/alpha、EXIF 方向及元数据移除、长图裁剪及中间像素限制、APNG 拒绝、非法参数和输入预算、公开 Host/编码路径/查询保留、来源与路径拒绝、CORS、上游重定向/拒绝/超时、不重试、并发忙碌、取消释放以及成功/失败/取消日志关联与脱敏。
-- 3 项 Python 测试：部署参数校验、权限和不覆盖秘密；已有 Caddy 2.10.2 运行短生命周期 HTTP 桩，实测双来源 CORS、PUT 预检、移除上游通配与 credentials、保留签名 Host/路径、阻止访问其他桶和 MinIO 管理路径。测试进程、监听与临时目录在结束时清理。
-- Docker Compose 配置解析、bootstrap shell 语法、Python 编译与 smoke CLI 参数解析。
-- Rust/Go/Debian/Caddy 镜像的远端 manifest 查询成功，Dockerfile/Compose 固定摘要；没有为此拉取镜像或执行本机 Docker 构建。
-- 独立 EasOS 本地附件副本所在对象容器/卷已按用户要求删除，禁用自动随预览启动。业务数据库和独立预览入口保留；现存 `deploy/development/**` 属于另一部署任务，本任务保留原内容。
+- 原 Rust 实现的 fmt、clippy 和 12 项测试通过：格式/质量、缩放、EXIF、像素预算、固定来源与 Host/路径/查询保留、重定向/超时、不重试、并发/取消及日志脱敏。本轮未改 Rust 处理实现。
+- 当前 2 项 Python 生成器测试通过，覆盖输入校验、两端口配置、权限与拒绝覆盖秘密。旧 Caddy 测试已删除，不再计作 Nginx 证据。
+- Linux amd64 实际 release 镜像构建成功。Nginx 1.30.5、Rust 处理器实际启动；Compose 配置与 nginx -t 通过。镜像摘要固定，构建在服务器执行。
+- 复用现有 MinIO，初始化独立私有桶 easos-preview 与最小桶权限应用凭据；MinIO 容器 ID 和启动时间前后相同。
+- 两端口 HTTPS 使用企业根 CA 验证。Mac 与 EasOS 容器均能验证证书链和 IP；未关闭证书校验。443 的图片健康路径被拒绝，8443 的 /healthz 返回 ok。
+- 远端真实 S3 smoke 通过：条件上传、重复 PUT 412、MD5 失败拒绝、HEAD/GET 字节一致、匿名/篡改签名拒绝、精确 CORS、管理/其他桶隔离、JPEG/PNG/WebP × contain/cover/fill 共 9 组转换、任意来源拒绝。测试对象清理成功。
+- 独立 EasOS 的 File 已安装系统 CA 版本，运行二进制 SHA256 与构建一致。MinIO 与通用 S3 两种草稿 config_test 均通过 upload_write、upload_overwrite_guard、server_head、server_read、download_read、cleanup。
+- File 新增 minio_preview，默认及已有模块的新上传分配到该桶；原桶和历史记录归属保留。业务数据库保留，此前约 18.6 GB 本地附件副本已按要求删除。
 
-详细命令输出保存在本地 `.checks/tests.log`、`.checks/python-tests.log`、`.checks/clippy.log` 等，不包含业务数据或真实凭据。临时生成的测试配置不用于部署。
+File 配置页面已实际点击“测试连接”，显示“连接测试成功”；截图保存在 `.checks/file-connection-success.png`，地址页面核对 443 存储与 8443 外部处理分别生效。
 
-## 部署后必须完成
+源检查输出与不含凭据的运行摘要存于本地 .checks。独立 EasOS 使用 minio-enterprise-tls-20261008 质量任务封存；秘密只在服务端私有配置、原配置的 0600 运维备份中，不进入 Git。
 
-- Linux release 镜像的实际构建和启动、Caddy 2.11.2 目标版本配置/运行、DNS/公开 TLS、MinIO 专用桶和应用权限初始化。这些不能由本机编译或 Caddy 2.10.2 桩测试替代。
-- 执行 `scripts/smoke.py`，实际验证 S3 条件上传、MD5、读写签名与字节、CORS、图片处理和临时对象回收。本次仅检查该脚本语法/CLI，未执行真实 S3 联调，不把 HTTP 桩当作 S3 兼容性通过。
-- 独立 EasOS File 自身“测试连接”，再用真实浏览器完成上传、缩略图、裁剪、原图下载、错误和删除链路，确认 CSP/CORS 与各调用者可达性。
-- 根据需要另行迁入历史附件，保持原 SID/存储归属；只有数据库记录无法恢复未复制的原图。
+## 未覆盖边界
 
-以上待验收边界均不影响开发代码与部署材料交付；服务器接入完成前，图片功能仍不能标为已恢复。
+内置浏览器访问两个远端 IP 入口时返回 ERR_BLOCKED_BY_CLIENT，未绕过浏览器限制。因此命令行 CORS、File 服务端连接测试及配置页面可见，不能替代浏览器直接 PUT、图片显示、下载与完整业务表单验收。需在允许该服务器访问的实际浏览器补齐此路径。
+
+没有迁入旧附件字节，12234 条历史 File 记录不会因切换新桶自动恢复图片；完整相册、Safari/iPad 触控、独立 CDN、任意其他 S3 实现、跨桶迁移与压力测试不在本次通过范围。deploy/development 属于另一任务维护，保留其文件与 MinIO 数据。

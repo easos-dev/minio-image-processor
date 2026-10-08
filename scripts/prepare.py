@@ -14,16 +14,15 @@ from urllib.parse import urlsplit
 from xml.sax.saxutils import escape
 
 
-def domain(value):
-    if len(value) > 253 or value != value.lower() or len(value.split('.')) < 2:
-        raise ValueError('域名必须是小写完整域名')
-    if not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x) for x in value.split('.')):
-        raise ValueError('域名不能含协议、端口或配置字符')
+def host(value):
     try:
-        ipaddress.ip_address(value)
+        if isinstance(ipaddress.ip_address(value), ipaddress.IPv4Address):
+            return value
     except ValueError:
-        return value
-    raise ValueError('HTTPS 自动证书配置需要域名')
+        pass
+    if len(value) > 253 or value != value.lower() or len(value.split('.')) < 2 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', x) for x in value.split('.')):
+        raise ValueError('需要 IPv4 或小写域名，不含协议、端口或配置字符')
+    return value
 
 
 def origin(value):
@@ -43,10 +42,9 @@ def write(path, data, mode=0o644):
     path.chmod(mode)
 
 
-def prepare(base, storage, processor, bucket, origins, minio_secrets, network):
-    storage, processor = domain(storage), domain(processor)
-    if storage == processor:
-        raise ValueError('存储和处理域名必须不同')
+def prepare(base, public_host, bucket, origins, minio_secrets, network):
+    public_host = host(public_host)
+    storage, processor = public_host, public_host + ":8443"
     if not re.fullmatch(r'[a-z][a-z0-9-]{1,48}[a-z0-9]', bucket):
         raise ValueError('桶名须为 3–50 位小写字母、数字和短横线')
     origins = list(dict.fromkeys(origin(x) for x in origins))
@@ -78,59 +76,73 @@ origin = "https://{storage}"
 upstream = "http://minio:9000"
 path_prefix = "/{bucket}/"
 ''')
-    # 此固定 MinIO 版本的桶 CORS 是空实现。公开入口由网关精确控制 CORS，
-    # 不依赖全局默认通配符，也不改动现有 MinIO 的运行配置。
-    cors_match = '\n        '.join(f'header Origin "{x}"' for x in origins)
-    # Caddy 默认错误日志也可能带请求 URI，屏蔽 HTTP 请求日志类别；保留 TLS/启动日志。
-    write(generated / 'Caddyfile', f'''{{
-    admin off
-    log {{
-        exclude http.log.access http.log.error
+    # 两个 TLS 端口分别承载 S3 与图片处理，保留 S3 Host、路径和签名查询。
+    # 企业证书由运维单独安装，只读挂载；配置生成器不读取或生成私钥。
+    cors_map = '\n        '.join(f'"{x}" "{x}";' for x in origins)
+    proxy_common = """proxy_set_header Host $http_host;
+            proxy_set_header Connection "";
+            proxy_http_version 1.1;
+            proxy_next_upstream off;
+            proxy_request_buffering off;
+            proxy_buffering off;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 60s;
+            proxy_send_timeout 60s;
+            proxy_hide_header Access-Control-Allow-Origin;
+            proxy_hide_header Access-Control-Allow-Credentials;
+            proxy_hide_header Access-Control-Allow-Methods;
+            proxy_hide_header Access-Control-Allow-Headers;
+            proxy_hide_header Access-Control-Expose-Headers;
+            proxy_hide_header Access-Control-Max-Age;
+            proxy_hide_header Cache-Control;"""
+    def locations(upstream, matches):
+        return '\n'.join(f'''        location {match} {{
+            if ($request_method = OPTIONS) {{ return 204; }}
+            {proxy_common}
+            proxy_pass http://{upstream};
+        }}''' for match in matches)
+    storage_locations = locations('minio:9000', [f'= /{bucket}', f'^~ /{bucket}/'])
+    image_locations = locations('image-processor:8080', ['= /', '= /healthz'])
+    write(generated / 'nginx.conf', f'''# 不记录访问 URI；查询参数携带短期存储签名。
+worker_processes auto;
+pid /tmp/nginx.pid;
+error_log /dev/null;
+events {{ worker_connections 1024; }}
+http {{
+    access_log off;
+    client_body_temp_path /tmp/client_temp;
+    proxy_temp_path /tmp/proxy_temp;
+    map $http_origin $allowed_origin {{
+        default "";
+        {cors_map}
     }}
-}}
-{storage} {{
-    @origin {{
-        {cors_match}
+    ssl_certificate /etc/nginx/tls/server.crt;
+    ssl_certificate_key /etc/nginx/tls/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    server_tokens off;
+    client_max_body_size 100m;
+    large_client_header_buffers 4 32k;
+    add_header Access-Control-Allow-Origin $allowed_origin always;
+    add_header Access-Control-Allow-Methods "GET, HEAD, PUT" always;
+    add_header Access-Control-Allow-Headers "content-type, content-md5, if-none-match" always;
+    add_header Access-Control-Expose-Headers "ETag, Content-Type, X-Request-Id" always;
+    add_header Access-Control-Max-Age "300" always;
+    add_header Vary Origin always;
+    add_header Cache-Control no-store always;
+    add_header Referrer-Policy no-referrer always;
+    add_header X-Content-Type-Options nosniff always;
+    server {{
+        listen 443 ssl;
+        server_name {public_host};
+{storage_locations}
+        location / {{ return 404; }}
     }}
-    @preflight {{
-        method OPTIONS
-        {cors_match}
-        header Access-Control-Request-Method GET
-        header Access-Control-Request-Method HEAD
-        header Access-Control-Request-Method PUT
+    server {{
+        listen 8443 ssl;
+        server_name {public_host};
+{image_locations}
+        location / {{ return 404; }}
     }}
-    @bucket path /{bucket} /{bucket}/*
-    route {{
-      header {{
-        +Vary Origin
-        >Cache-Control no-store
-      }}
-      header @origin {{
-        >Access-Control-Allow-Origin "{{http.request.header.Origin}}"
-        >Access-Control-Allow-Methods "GET, HEAD, PUT"
-        >Access-Control-Allow-Headers "content-type, content-md5, if-none-match"
-        >Access-Control-Expose-Headers "ETag, Content-Type"
-        >Access-Control-Max-Age "300"
-      }}
-      respond @preflight "" 204
-      handle @bucket {{
-        reverse_proxy minio:9000 {{
-            header_down -Access-Control-Allow-Origin
-            header_down -Access-Control-Allow-Credentials
-            header_down -Access-Control-Allow-Methods
-            header_down -Access-Control-Allow-Headers
-            header_down -Access-Control-Expose-Headers
-            header_down -Access-Control-Max-Age
-        }}
-      }}
-      handle {{
-        respond 404
-      }}
-    }}
-}}
-{processor} {{
-    reverse_proxy image-processor:8080
-    header Referrer-Policy no-referrer
 }}
 ''')
     allowed = ''.join(f'<AllowedOrigin>{escape(x)}</AllowedOrigin>' for x in origins)
@@ -169,8 +181,7 @@ image_processor = {{ https = true, host = "{processor}" }}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--storage-domain', required=True)
-    parser.add_argument('--image-domain', required=True)
+    parser.add_argument('--host', required=True, help='证书 SAN 中的 IPv4 或域名，443 为存储，8443 为图片处理')
     parser.add_argument('--bucket', default='easos-preview')
     parser.add_argument('--gui-origin', action='append', required=True)
     parser.add_argument('--minio-secrets-dir', required=True)
@@ -178,7 +189,7 @@ def main():
     parser.add_argument('--output', type=Path, default=Path(__file__).resolve().parents[1] / 'deploy/https')
     args = parser.parse_args()
     try:
-        prepare(args.output, args.storage_domain, args.image_domain, args.bucket, args.gui_origin, args.minio_secrets_dir, args.minio_network)
+        prepare(args.output, args.host, args.bucket, args.gui_origin, args.minio_secrets_dir, args.minio_network)
     except (ValueError, OSError):
         parser.exit(1, '生成失败：请检查参数、目录权限和现有配置；没有启动任何服务。\n')
     print('配置已生成，凭据未输出。部署步骤见 deploy/https/README.md。')

@@ -5,7 +5,7 @@
 - [接口和边界](docs/protocol.md)
 - [目标服务器 HTTPS 部署与 EasOS 接入](deploy/https/README.md)
 - [已有开发服务器 MinIO 部署](deploy/development/README.md)（由独立部署任务维护）
-- [验收记录与待完成项](docs/verification.md)
+- [验收记录与边界](docs/verification.md)
 
 ## 开发检查
 

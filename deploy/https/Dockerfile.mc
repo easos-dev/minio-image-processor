@@ -1,5 +1,5 @@
 # 一次性初始化客户端也从官方固定源码构建；不依赖 latest 标签。
-FROM golang:1.27-bookworm@sha256:8d48e12ec56735e9358640898b9d9fcca110612ed8a5567438c0a1baa24e66 AS build
+FROM golang:1.26.8-bookworm@sha256:dc9ad6c05acc7a88e5b71bde60a5fe3bd4b9f0db209011711b464107438a8107 AS build
 WORKDIR /src
 RUN curl -fsSL https://codeload.github.com/minio/mc/tar.gz/d6541ea280b73a834b64d4097e21f2be77676104 \
     | tar xz --strip-components=1
