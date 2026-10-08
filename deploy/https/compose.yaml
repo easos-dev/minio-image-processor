@@ -1,0 +1,58 @@
+# 部署准备：在目标 Linux 服务器执行，不在本机启动。
+# 复用已存在的 MinIO 网络与数据卷，不重新部署/重启 MinIO。
+name: image-processor-http
+services:
+  image-processor:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: image-processor:0.1.0
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 128
+    volumes:
+      - ./generated/config.toml:/etc/image-processor/config.toml:ro
+    networks: [storage]
+    logging: &safe-logs
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  gateway:
+    image: caddy:2.11.2-alpine@sha256:834468128c7696cec0ceea6172f7d692daf645ae51983ca76e39da54a97c570d
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./generated/Caddyfile:/etc/caddy/Caddyfile:ro
+      - certificates:/data
+      - gateway-config:/config
+    networks: [storage]
+    depends_on: [image-processor]
+    logging: *safe-logs
+  # 显式执行一次，创建专用私有桶和应用用户；不会随 up 自动运行。
+  bootstrap:
+    profiles: [setup]
+    build:
+      context: .
+      dockerfile: Dockerfile.mc
+    entrypoint: ["/bin/sh", "/setup/bootstrap.sh"]
+    environment:
+      BUCKET: ${BUCKET:?run prepare.py on the server first}
+    volumes:
+      - ./bootstrap.sh:/setup/bootstrap.sh:ro
+      - ./generated:/setup/generated:ro
+      - ./secrets:/setup/secrets:ro
+      - ${MINIO_SECRETS_DIR:?set existing MinIO secrets directory}:/setup/minio-secrets:ro
+    tmpfs: [/tmp]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks: [storage]
+    logging: *safe-logs
+networks:
+  storage:
+    external: true
+    name: ${MINIO_NETWORK:-image-processor-dev}
+volumes:
+  certificates:
+  gateway-config:

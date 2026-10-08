@@ -1,0 +1,12 @@
+/target/
+/.checks/
+/.venv/
+/deploy/.env
+/deploy/secrets/
+/deploy/generated/
+/config.toml
+*.pem
+*.key
+.DS_Store
+__pycache__/
+*.pyc

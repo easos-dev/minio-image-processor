@@ -1,0 +1,37 @@
+[package]
+name = "image-processor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+axum = "0.8.9"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
+webp = { version = "0.3.1", default-features = false }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_urlencoded = "0.7"
+toml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+url = "2"
+percent-encoding = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+png = "0.18.1"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

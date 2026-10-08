@@ -1,0 +1,13 @@
+listen = "0.0.0.0:8080"
+allowed_origins = ["http://127.0.0.1:18080"]
+max_input_bytes = 104857600
+max_input_pixels = 24000000
+max_concurrent = 2
+fetch_timeout_seconds = 20
+
+[[sources]]
+# url 参数必须属于该公开 origin 和桶前缀。
+origin = "https://objects.example.invalid"
+# 固定受信容器回源；仍使用原始公开 Host，使 SigV4 签名有效。
+upstream = "http://minio:9000"
+path_prefix = "/easos-preview/"
