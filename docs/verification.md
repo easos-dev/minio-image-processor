@@ -1,24 +1,35 @@
 # 开发与部署验收
 
-2026-10-08，在独立项目与授权服务器完成以下验证。常驻 MinIO、Nginx 和图片处理均在 `33.79.0.35`，没有在 Mac 新增这些服务。EasOS 修改仅位于独立工作树和 18080 预览。
+本项目独立于 EasOS。当前常驻服务在 `33.79.0.35`：MinIO经Nginx 443，图片处理经Nginx 8443；Mac没有部署这些常驻服务。EasOS改动及运行验收只涉及独立工作树 `easos-codex` 和 `easos-preview-codex`（18080）。
 
-## 已通过
+## 当前处理协议与代码验证
 
-- 原 Rust 实现的 fmt、clippy 和 12 项测试通过：格式/质量、缩放、EXIF、像素预算、固定来源与 Host/路径/查询保留、重定向/超时、不重试、并发/取消及日志脱敏。本轮未改 Rust 处理实现。
-- 当前 2 项 Python 生成器测试通过，覆盖输入校验、两端口配置、权限与拒绝覆盖秘密。旧 Caddy 测试已删除，不再计作 Nginx 证据。
-- Linux amd64 实际 release 镜像构建成功。Nginx 1.30.5、Rust 处理器实际启动；Compose 配置与 nginx -t 通过。镜像摘要固定，构建在服务器执行。
-- 复用现有 MinIO，初始化独立私有桶 easos-preview 与最小桶权限应用凭据；MinIO 容器 ID 和启动时间前后相同。
-- 两端口 HTTPS 使用企业根 CA 验证。Mac 与 EasOS 容器均能验证证书链和 IP；未关闭证书校验。443 的图片健康路径被拒绝，8443 的 /healthz 返回 ok。
-- 远端真实 S3 smoke 通过：条件上传、重复 PUT 412、MD5 失败拒绝、HEAD/GET 字节一致、匿名/篡改签名拒绝、精确 CORS、管理/其他桶隔离、JPEG/PNG/WebP × contain/cover/fill 共 9 组转换、任意来源拒绝。测试对象清理成功。
-- 独立 EasOS 的 File 已安装系统 CA 版本，运行二进制 SHA256 与构建一致。MinIO 与通用 S3 两种草稿 config_test 均通过 upload_write、upload_overwrite_guard、server_head、server_read、download_read、cleanup。
-- File 新增 minio_preview，默认及已有模块的新上传分配到该桶；原桶和历史记录归属保留。业务数据库保留，此前约 18.6 GB 本地附件副本已按要求删除。
+2026-10-08 的短参数/格式/缓存版本完成以下检查：
 
-File 配置页面已实际点击“测试连接”，显示“连接测试成功”；截图保存在 `.checks/file-connection-success.png`，地址页面核对 443 存储与 8443 外部处理分别生效。
+- Rust fmt、clippy（全部target、warnings拒绝）通过；C worker以 `-Wall -Wextra -Werror` 编译通过。
+- 目标Linux release下13项Rust测试全部通过（12项服务/变换、1项实际日志）：JPEG/PNG/BMP/GIF/WebP/TIFF/HEIC/AVIF输入输出、GIF与动画WebP帧预算、EXIF、透明、质量、三种缩放、不放大、SSRF/来源及签名Host保留、超时/并发/取消、缓存条件校验及安全日志。整组服务测试6.83秒。
+- 2项部署生成器测试通过；Nginx配置显式暴露X-Image-Cache，原生成器已有的两端口、秘密权限与拒绝覆盖检查保留。
+- EasOS `image-parity-20261008` 的13项质量门禁封存并验证；File全生命周期用例在独立PostgreSQL新建的专属临时数据库通过，结束后删除该数据库。夹具改为使用显式配置及manifest权限，移除了固定共享端口/容器依赖。
 
-源检查输出与不含凭据的运行摘要存于本地 .checks。独立 EasOS 使用 minio-enterprise-tls-20261008 质量任务封存；秘密只在服务端私有配置、原配置的 0600 运维备份中，不进入 Git。
+## 已构建、安装与真实链路
 
-## 未覆盖边界
+- 远端Linux amd64生产镜像构建、启动成功；只替换图片处理器，Nginx校验配置并重载。MinIO容器ID和启动时间前后相同。
+- 独立EasOS通过Kernel包升级安装File，保留配置和数据。安装二进制SHA256与构建产物一致：`2673ceca95b72d2e70f7c7de438da1346eb6b0c9309a251100345da3228368e9`。
+- 企业CA验证保持开启。真实S3 smoke通过条件PUT/重复412、MD5失败拒绝、HEAD/GET一致、匿名/篡改签名拒绝、精确CORS、管理路径及其他桶隔离、7种静态输出×3种缩放的21组转换和缓存二次命中；HEIC/AVIF解码尺寸由原生往返测试验证，smoke不把无法用Pillow解码当作通过。随机smoke对象已物理清理。
+- 完整File实际路径通过：公开SID请求返回302；合法w/h/q/r/f保留，非法值/未知字段/外来url丢弃；处理器从MinIO读取，第二次返回HIT且字节一致；d=1直接到MinIO原文件。
+- 隔离Chrome真实打开File地址，经302后解码显示128×64 WebP，HTTP200、X-Image-Cache=HIT。另核对File清理预览返回的远端PNG，浏览器显示320×200（原图较小，默认不放大）。没有关闭TLS验证或使用用户共享调试连接。
+- File链路测试只创建本任务随机目录的临时图片，结束通过File逻辑删除；物理字节遵循File现有PUT保护期和显式清理流程。上一轮取消的Chrome草稿同样保持过期，未提交业务订单。
 
-内置浏览器访问两个远端 IP 入口时返回 ERR_BLOCKED_BY_CLIENT，未绕过浏览器限制。因此命令行 CORS、File 服务端连接测试及配置页面可见，不能替代浏览器直接 PUT、图片显示、下载与完整业务表单验收。需在允许该服务器访问的实际浏览器补齐此路径。
+## 性能样本
 
-没有迁入旧附件字节，12234 条历史 File 记录不会因切换新桶自动恢复图片；完整相册、Safari/iPad 触控、独立 CDN、任意其他 S3 实现、跨桶迁移与压力测试不在本次通过范围。deploy/development 属于另一任务维护，保留其文件与 MinIO 数据。
+同一台服务器、1200万像素JPEG噪声样图、目标800×600。旧处理器WebP两次约1125/732ms，新版首次460ms、缓存命中12ms；JPEG旧版654/644ms，新版首次304ms、命中12ms。包含HTTPS及回源；当前JPEG来源的q还按OSS相对质量处理，与旧版绝对质量不同，因此这些是端到端样本，不是固定画质的编码器基准或压力测试。
+
+此前HEIC在容器内按宿主机核数分配x265线程池导致超时；改为libheif显式单线程编码后格式回归通过。WebP采用原生libwebp、libvips缩小解码及有界缓存；没有手写编解码算法。
+
+## 保留边界
+
+对齐的是当前File短参数所覆盖的OSS语义和八种格式范围，不包含File没有定义的水印、旋转角度等全部OSS操作，不保证与OSS专有编码器逐字节相同。JPEG源质量为成熟量化表估计。默认输入预算2400万像素，低于OSS部分配额；HEIF输出采用8位像素，具体资源限制见[接口和边界](protocol.md)。缓存为进程内256MiB/512项、1小时，重启清空；命中仍校验当前签名和ETag。
+
+Chrome图片链路已通过，但本轮未重做完整业务表单、Safari/iPad触控、独立CDN、任意其他S3或并发压力验收。历史附件未迁入，旧File记录不会因切换新桶恢复图片。`deploy/development`及其MinIO数据属于另一任务，未修改。
+
+源码测试、smoke、性能及浏览器的脱敏结果保存在 `.checks/`，截图在 `output/playwright/remote-image-chrome.png`；这些不是发布资产。原图/签名/凭据不进入Git。

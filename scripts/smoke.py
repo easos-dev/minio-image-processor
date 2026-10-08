@@ -133,16 +133,26 @@ def run(args):
         check(http(args.storage+'/different-bucket/object')[0] == 404)
         passed.append(stage)
         stage = 'image_conversion'
-        for fit, size in [('contain',(40,20)), ('cover',(40,40)), ('fill',(40,40))]:
-            for fmt, mime in [('jpg','image/jpeg'),('png','image/png'),('webp','image/webp')]:
+        for fit, size in [(1,(40,20)), (2,(40,40)), (0,(40,40))]:
+            for fmt, mime in [('jpeg','image/jpeg'),('png','image/png'),('webp','image/webp'),('bmp','image/bmp'),('tiff','image/tiff'),('heic','image/heic'),('avif','image/avif')]:
                 signed = client.generate_presigned_url('get_object', Params={'Bucket':args.bucket,'Key':key}, ExpiresIn=60)
-                query = urllib.parse.urlencode(dict(url=signed,width=40,height=40,quality=85,fit=fit,format=fmt))
+                query = urllib.parse.urlencode(dict(url=signed,w=40,h=40,q=0.85,r=fit,f=fmt))
                 status, got_headers, encoded = http(args.processor+'/?'+query, headers={'Origin':args.gui_origin})
                 check(status == 200 and got_headers.get('content-type') == mime)
                 check(got_headers.get('access-control-allow-origin') == args.gui_origin)
                 check(got_headers.get('cache-control') == 'no-store')
-                with Image.open(io.BytesIO(encoded)) as decoded:
-                    decoded.load(); check(decoded.size == size)
+                check(len(encoded) > 0)
+                if fmt not in ('heic','avif'):
+                    with Image.open(io.BytesIO(encoded)) as decoded:
+                        decoded.load(); check(decoded.size == size)
+                # 相同参数第二次只验证 MinIO ETag，复用编码结果。
+                status2, cached, encoded2 = http(args.processor+'/?'+query, headers={'Origin':args.gui_origin})
+                check(status2 == 200 and cached.get('x-image-cache') == 'HIT' and encoded2 == encoded)
+                check('x-image-cache' in cached.get('access-control-expose-headers','').lower())
+        passed.append(stage)
+        stage = 'cache_authorization'
+        query = urllib.parse.urlencode(dict(url=tampered,w=40,h=40,q=0.85,r=0,f='webp'))
+        check(http(args.processor+'/?'+query)[0] == 502)
         passed.append(stage)
         stage = 'processor_source_rejection'
         query = urllib.parse.urlencode(dict(url='http://169.254.169.254/latest/meta-data/'))

@@ -34,7 +34,7 @@ fn request(path: &str) -> Request<Body> {
         format!("https://objects.example.test/bucket/{path}?X-Amz-Signature=DO_NOT_LOG_SIGNATURE");
     let query = serde_urlencoded::to_string([("url", url)]).unwrap();
     Request::builder()
-        .uri(format!("/?{query}&format=png"))
+        .uri(format!("/?{query}&f=png"))
         .header("authorization", "Bearer DO_NOT_LOG_BEARER")
         .body(Body::empty())
         .unwrap()

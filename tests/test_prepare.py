@@ -31,6 +31,7 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual(bucket['download']['host'], '33.79.0.35')
             self.assertEqual(bucket['server']['host'], '33.79.0.35')
             self.assertIn('listen 443 ssl;', (base/'generated/nginx.conf').read_text())
+            self.assertIn('X-Image-Cache', (base/'generated/nginx.conf').read_text())
             cors = ET.parse(base/'generated/cors.xml')
             self.assertIn('if-none-match', [x.text for x in cors.findall('.//AllowedHeader')])
             policy = json.loads((base/'generated/policy.json').read_text())

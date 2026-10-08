@@ -40,20 +40,35 @@ pub fn target(value: &str, sources: &[Source]) -> Result<(Url, String)> {
     ))
 }
 
-pub async fn fetch(client: &reqwest::Client, config: &Config, source: &str) -> Result<Vec<u8>> {
+pub enum Fetched {
+    Modified {
+        bytes: Vec<u8>,
+        etag: Option<String>,
+    },
+    Unchanged,
+}
+/// 即使命中处理缓存也让 MinIO 验证当前签名；只在当前授权有效且对象未变时接受 304。
+pub async fn fetch(
+    client: &reqwest::Client,
+    config: &Config,
+    source: &str,
+    etag: Option<&str>,
+) -> Result<Fetched> {
     let (url, host) = target(source, &config.sources)?;
-    let mut response = client
-        .get(url)
-        .header(reqwest::header::HOST, host)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                Failure(StatusCode::GATEWAY_TIMEOUT, "source_timeout")
-            } else {
-                Failure::upstream("source_unreachable")
-            }
-        })?;
+    let mut request = client.get(url).header(reqwest::header::HOST, host);
+    if let Some(etag) = etag {
+        request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+    }
+    let mut response = request.send().await.map_err(|e| {
+        if e.is_timeout() {
+            Failure(StatusCode::GATEWAY_TIMEOUT, "source_timeout")
+        } else {
+            Failure::upstream("source_unreachable")
+        }
+    })?;
+    if response.status() == StatusCode::NOT_MODIFIED && etag.is_some() {
+        return Ok(Fetched::Unchanged);
+    }
     if response.status() != StatusCode::OK {
         return Err(Failure::upstream("source_rejected"));
     }
@@ -63,6 +78,13 @@ pub async fn fetch(client: &reqwest::Client, config: &Config, source: &str) -> R
     {
         return Err(Failure(StatusCode::PAYLOAD_TOO_LARGE, "source_too_large"));
     }
+    // 弱 ETag 不保证字节一致，不能用于变换结果复用。
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| v.starts_with('"') && v.ends_with('"') && v.len() <= 512)
+        .map(str::to_owned);
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|e| {
         if e.is_timeout() {
@@ -79,5 +101,5 @@ pub async fn fetch(client: &reqwest::Client, config: &Config, source: &str) -> R
     if bytes.is_empty() {
         return Err(Failure::upstream("source_empty"));
     }
-    Ok(bytes)
+    Ok(Fetched::Modified { bytes, etag })
 }

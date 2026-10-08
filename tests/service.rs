@@ -85,20 +85,15 @@ async fn body(response: axum::response::Response) -> Bytes {
 #[test]
 fn shape_format_quality_alpha_and_defaults() {
     let input = png(120, 60);
-    for (fit, size) in [
-        ("contain", (40, 20)),
-        ("fill", (40, 40)),
-        ("cover", (40, 40)),
-    ] {
+    for (fit, size) in [("1", (40, 20)), ("0", (40, 40)), ("2", (40, 40))] {
         for (format, mime) in [
-            ("jpg", "image/jpeg"),
             ("jpeg", "image/jpeg"),
             ("png", "image/png"),
             ("webp", "image/webp"),
         ] {
             let result = transform::transform(
                 &input,
-                &parameters(&format!("width=40&height=40&fit={fit}&format={format}")),
+                &parameters(&format!("w=40&h=40&r={fit}&f={format}")),
                 100_000,
             )
             .unwrap();
@@ -113,31 +108,21 @@ fn shape_format_quality_alpha_and_defaults() {
     let default = transform::transform(&input, &parameters(""), 100_000).unwrap();
     assert_eq!((default.width, default.height), (120, 60));
     assert_eq!(default.content_type, "image/png");
-    for f in ["jpg", "webp"] {
-        let a = transform::transform(
-            &input,
-            &parameters(&format!("format={f}&quality=20")),
-            100_000,
-        )
-        .unwrap();
-        let b = transform::transform(
-            &input,
-            &parameters(&format!("format={f}&quality=95")),
-            100_000,
-        )
-        .unwrap();
+    for f in ["jpeg", "webp"] {
+        let a =
+            transform::transform(&input, &parameters(&format!("f={f}&q=0.2")), 100_000).unwrap();
+        let b =
+            transform::transform(&input, &parameters(&format!("f={f}&q=0.95")), 100_000).unwrap();
         assert_ne!(a.bytes, b.bytes);
     }
     let mut transparent = Cursor::new(Vec::new());
     DynamicImage::new_rgba8(2, 2)
         .write_to(&mut transparent, ImageFormat::Png)
         .unwrap();
-    let result =
-        transform::transform(transparent.get_ref(), &parameters("format=jpg"), 100).unwrap();
+    let result = transform::transform(transparent.get_ref(), &parameters("f=jpeg"), 100).unwrap();
     let decoded = image::load_from_memory(&result.bytes).unwrap().to_rgb8();
     assert!(decoded.get_pixel(0, 0).0.iter().all(|x| *x > 245));
-    let result =
-        transform::transform(transparent.get_ref(), &parameters("format=png"), 100).unwrap();
+    let result = transform::transform(transparent.get_ref(), &parameters("f=png"), 100).unwrap();
     assert_eq!(
         image::load_from_memory(&result.bytes)
             .unwrap()
@@ -160,17 +145,17 @@ fn exif_orientation_is_applied_before_resize() {
     source.extend(((exif.len() + 2) as u16).to_be_bytes());
     source.extend(exif);
     source.extend(&jpeg[2..]);
-    let result = transform::transform(&source, &parameters("width=3&height=3"), 100).unwrap();
+    let result = transform::transform(&source, &parameters("w=3&h=3"), 100).unwrap();
     assert_eq!((result.width, result.height), (2, 3));
     assert!(!result.bytes.windows(6).any(|w| w == b"Exif\0\0"));
 }
 #[test]
 fn invalid_images_parameters_and_pixel_bombs_fail() {
-    for query in ["width=0", "height=1921", "quality=0", "quality=101"] {
+    for query in ["w=0", "h=1921", "q=0", "q=1.01"] {
         assert!(parameters(query).validate().is_err());
     }
     assert!(serde_urlencoded::from_str::<Parameters>("url=x&unknown=y").is_err());
-    assert!(serde_urlencoded::from_str::<Parameters>("url=x&width=10&width=20").is_err());
+    assert!(serde_urlencoded::from_str::<Parameters>("url=x&w=10&w=20").is_err());
     assert!(transform::transform(b"<svg onload='alert(1)'/>", &parameters(""), 100).is_err());
     assert_eq!(
         transform::transform(&png(20, 20), &parameters(""), 399)
@@ -249,7 +234,7 @@ async fn http_pipeline_preserves_signed_host_cors_and_pixels_without_forwarding_
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/?{query}&width=20&height=20&format=webp"))
+                .uri(format!("/?{query}&w=20&h=20&f=webp"))
                 .header("Origin", "http://127.0.0.1:18080")
                 .header("Authorization", "Bearer must-not-forward")
                 .header("Cookie", "must-not-forward")
@@ -361,48 +346,106 @@ async fn timeout_busy_and_cancel_release_async_download_permit() {
 }
 
 #[test]
-fn cover_crops_extreme_aspect_ratio_before_resampling() {
-    for (w, h) in [(1, 32768), (32768, 1)] {
-        let result = transform::transform(
-            &png(w, h),
-            &parameters("width=64&height=64&fit=cover&format=png"),
-            40000,
+fn no_upscale_and_all_native_formats_round_trip() {
+    for r in 0..=2 {
+        let output = transform::transform(
+            &png(40, 20),
+            &parameters(&format!("w=80&h=80&r={r}")),
+            10000,
         )
         .unwrap();
-        assert_eq!((result.width, result.height), (64, 64));
+        assert_eq!((output.width, output.height), (40, 20));
     }
+    for f in ["jpeg", "png", "webp", "bmp", "tiff", "heic", "avif"] {
+        let output = transform::transform(
+            &png(120, 60),
+            &parameters(&format!("w=40&h=40&f={f}")),
+            100000,
+        )
+        .unwrap_or_else(|e| panic!("encode {f}: {e:?}"));
+        let decoded = transform::transform(&output.bytes, &parameters("f=png"), 100000).unwrap();
+        assert_eq!((decoded.width, decoded.height), (40, 20), "{f}");
+    }
+    let output = transform::transform(&png(40, 20), &parameters("f=gif"), 10000).unwrap();
+    assert_eq!(output.content_type, "image/png");
+    assert!(transform::transform(&png(1, 30001), &parameters(""), 40000).is_err());
 }
-
 #[test]
-fn animations_and_oversized_resampling_buffers_are_rejected() {
-    let mut bytes = Vec::new();
+fn gif_animation_preserves_frames_and_enforces_total_pixel_budget() {
+    let mut gif = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_animated(2, 0).unwrap();
-        let mut writer = encoder.write_header().unwrap();
-        writer.write_image_data(&[255; 16]).unwrap();
-        writer.write_image_data(&[0; 16]).unwrap();
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+        encoder
+            .set_repeat(image::codecs::gif::Repeat::Infinite)
+            .unwrap();
+        for alpha in [128, 255] {
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(40, 20, image::Rgba([alpha, 0, 0, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(100, 1),
+                ))
+                .unwrap();
+        }
     }
     assert_eq!(
-        transform::transform(&bytes, &parameters(""), 1000)
+        transform::transform(&gif, &parameters(""), 1599)
             .err()
             .unwrap()
             .1,
-        "animated_image_not_supported"
+        "source_pixel_limit"
     );
+    for f in ["gif", "webp"] {
+        let output =
+            transform::transform(&gif, &parameters(&format!("w=20&h=20&f={f}")), 10000).unwrap();
+        assert_eq!((output.width, output.height), (20, 10));
+        let back = transform::transform(&output.bytes, &parameters("f=gif"), 399);
+        assert!(back.is_err(), "both frames must count for {f}");
+    }
+}
+
+#[tokio::test]
+async fn cache_revalidates_authorization_versions_and_normalizes_parameters() {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let version = Arc::new(AtomicUsize::new(1));
+    let v = version.clone();
+    let server = serve(Router::new().fallback(get(move |r: Request<Body>| {
+        let version = v.load(Ordering::SeqCst);
+        async move {
+            if r.uri().query().unwrap_or("").contains("denied") {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            let etag = format!("\"{version}\"");
+            if r.headers()
+                .get("if-none-match")
+                .and_then(|s| s.to_str().ok())
+                == Some(etag.as_str())
+            {
+                return StatusCode::NOT_MODIFIED.into_response();
+            }
+            ([("etag", etag)], png(80, 40)).into_response()
+        }
+    })))
+    .await;
+    let app = web::app(config(&server.origin)).unwrap();
+    let base = "https://objects.example.test/bucket/cache?X-Amz-Signature=";
+    let first = request(app.clone(), &format!("{base}one"), "w=20&q=0.9&f=webp").await;
+    assert_eq!(first.headers()["x-image-cache"], "MISS");
+    let bytes = body(first).await;
+    let second = request(app.clone(), &format!("{base}two"), "f=webp&q=0.90&w=20").await;
+    assert_eq!(second.headers()["x-image-cache"], "HIT");
+    assert_eq!(body(second).await, bytes);
     assert_eq!(
-        transform::transform(
-            &png(100, 1),
-            &parameters("width=20&height=20&fit=fill"),
-            1000
-        )
-        .err()
-        .unwrap()
-        .1,
-        "intermediate_pixel_limit"
+        request(app.clone(), &format!("{base}denied"), "w=20&f=webp")
+            .await
+            .status(),
+        502
     );
+    version.store(2, Ordering::SeqCst);
+    let changed = request(app, &format!("{base}three"), "w=20&f=webp").await;
+    assert_eq!(changed.headers()["x-image-cache"], "MISS");
 }
 
 #[tokio::test]

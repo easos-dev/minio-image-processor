@@ -125,7 +125,7 @@ http {{
     add_header Access-Control-Allow-Origin $allowed_origin always;
     add_header Access-Control-Allow-Methods "GET, HEAD, PUT" always;
     add_header Access-Control-Allow-Headers "content-type, content-md5, if-none-match" always;
-    add_header Access-Control-Expose-Headers "ETag, Content-Type, X-Request-Id" always;
+    add_header Access-Control-Expose-Headers "ETag, Content-Type, X-Request-Id, X-Image-Cache" always;
     add_header Access-Control-Max-Age "300" always;
     add_header Vary Origin always;
     add_header Cache-Control no-store always;

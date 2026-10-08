@@ -33,7 +33,7 @@ docker compose up -d image-processor gateway
 
 生成器拒绝覆盖已有 generated/secrets/.env。应用 AK/SK 为独立凭据，权限仅限专用私有桶，文件 0600；根凭据只挂载给一次性 bootstrap，不能交给 EasOS。已有同名桶使 bootstrap 停止，避免接管数据；中断后检查阶段并手动续做，禁止删除凭据再初始化。已有部署只审查并更新配置、重建所需服务，不再次 bootstrap。
 
-处理器使用镜像内 nobody 身份、只读文件系统与资源限制；Nginx 的临时目录使用 tmpfs。没有业务轮询、同步、自动重试或重启循环。`docker compose stop` 仅停止本目录服务；不删除共享网络或 MinIO 卷。
+处理器使用镜像内 nobody 身份、只读文件系统与资源限制；图片临时文件仅放在远端512MiB tmpfs，缓存为有界内存；Nginx 的临时目录也使用 tmpfs。没有业务轮询、同步、自动重试或重启循环。`docker compose stop` 仅停止本目录服务；不删除共享网络或 MinIO 卷。
 
 网关不记录含签名 URI 的 access/error 日志；启动配置错误仍可见。处理器保留脱敏阶段和终态日志，不输出源地址或凭据。固定 MinIO 社区版本的桶 CORS 是空实现，因此 CORS 由 Nginx 精确管理：只允许配置的 GUI origin、GET/HEAD/PUT 和必要请求头，并清除上游宽泛 CORS。generated/cors.xml 仅供支持该功能的其他 S3 服务参考。
 
@@ -51,7 +51,7 @@ python3 -m venv .venv
   --ca-file deploy/https/tls/ca.crt
 ```
 
-实测条件 PUT/412、MD5 拒绝、HEAD/GET 一致性、匿名/篡改签名拒绝、允许和拒绝来源的 CORS、管理路径隔离、9 组图片转换和任意来源拒绝。TLS 始终验证证书链、有效期和主机/IP；企业根 CA 缺少 KeyUsage，Python helper 使用常规 TLS 客户端验证，不额外启用 Python 3.13 的严格 X.509 扩展检查，不使用跳过证书验证。
+实测条件 PUT/412、MD5 拒绝、HEAD/GET 一致性、匿名/篡改签名拒绝、允许和拒绝来源的 CORS、管理路径隔离、21组静态格式/缩放转换、缓存HIT/签名拒绝和任意来源拒绝。TLS 始终验证证书链、有效期和主机/IP；企业根 CA 缺少 KeyUsage，Python helper 使用常规 TLS 客户端验证，不额外启用 Python 3.13 的严格 X.509 扩展检查，不使用跳过证书验证。
 
 ## 独立 EasOS 配置
 

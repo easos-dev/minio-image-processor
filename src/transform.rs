@@ -1,204 +1,168 @@
 use crate::error::{Failure, Result};
 use axum::http::StatusCode;
-use image::{
-    DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, imageops::FilterType,
-};
 use serde::Deserialize;
-use std::io::Cursor;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
-#[derive(Clone, Copy, Debug, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum Fit {
-    Fill,
-    #[default]
-    Contain,
-    Cover,
-}
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Format {
-    #[serde(alias = "jpeg")]
-    Jpg,
-    Png,
-    Webp,
-}
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Parameters {
     pub url: String,
     #[serde(default = "dimension")]
-    pub width: u32,
+    pub w: u32,
     #[serde(default = "dimension")]
-    pub height: u32,
+    pub h: u32,
     #[serde(default = "quality")]
-    pub quality: u8,
-    #[serde(default)]
-    pub fit: Fit,
-    pub format: Option<Format>,
+    pub q: f64,
+    #[serde(default = "resize")]
+    pub r: u8,
+    pub f: Option<String>,
+    pub d: Option<String>,
 }
 fn dimension() -> u32 {
     1920
 }
-fn quality() -> u8 {
-    90
+fn quality() -> f64 {
+    0.9
+}
+fn resize() -> u8 {
+    1
 }
 impl Parameters {
     pub fn validate(&self) -> Result<()> {
-        if !(1..=1920).contains(&self.width)
-            || !(1..=1920).contains(&self.height)
-            || !(1..=100).contains(&self.quality)
+        if !(1..=1920).contains(&self.w)
+            || !(1..=1920).contains(&self.h)
+            || !self.q.is_finite()
+            || !(0.01..=1.0).contains(&self.q)
+            || self.r > 2
+            || self.d.as_deref().is_some_and(|d| d != "0")
+            || self.f.as_deref().is_some_and(|f| !FORMATS.contains(&f))
         {
             return Err(Failure::invalid("invalid_transform"));
         }
         Ok(())
     }
+    /// 规范化整数质量，缓存键不受浮点文本写法或查询顺序影响。
+    pub fn quality(&self) -> u8 {
+        (self.q * 100.0).round() as u8
+    }
+    pub fn cache_variant(&self) -> String {
+        format!(
+            "v2:{}:{}:{}:{}:{}",
+            self.w,
+            self.h,
+            self.quality(),
+            self.r,
+            self.f.as_deref().unwrap_or("source")
+        )
+    }
 }
+pub const FORMATS: &[&str] = &["jpeg", "png", "webp", "bmp", "gif", "tiff", "heic", "avif"];
+#[derive(Clone)]
 pub struct Output {
     pub bytes: Vec<u8>,
     pub content_type: &'static str,
     pub width: u32,
     pub height: u32,
 }
-
-/// 先探测真实格式和像素预算，再解码及 EXIF 旋转，最后缩放和重新编码。
-/// 不信任 Content-Type，不执行 SVG，不读文件路径；重编码不保留 EXIF/GPS 等元数据。
+/// 仅允许明确的栅格魔数，SVG/PDF/URL/脚本不能进入通用图像加载器。
+fn source_format(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[255, 216, 255]) {
+        Some("jpeg")
+    } else if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if b.starts_with(b"BM") {
+        Some("bmp")
+    } else if b.starts_with(b"II*\0")
+        || b.starts_with(b"MM\0*")
+        || b.starts_with(b"II+\0")
+        || b.starts_with(b"MM\0+")
+    {
+        Some("tiff")
+    } else if b.starts_with(b"RIFF") && b.get(8..12) == Some(b"WEBP") {
+        Some("webp")
+    } else if b.get(4..8) == Some(b"ftyp") {
+        match b.get(8..12)? {
+            b"avif" | b"avis" => Some("avif"),
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1" | b"msf1" => Some("heic"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+/// 子进程只接收父进程生成的临时路径和已校验标量，不使用 shell。
+/// URL/Host/签名留在网络层；stderr 丢弃避免 codec 打印不受信的元数据。
+/// 工作线程持有并发名额直至子进程退出，客户端取消不能突破资源上限。
 pub fn transform(bytes: &[u8], params: &Parameters, max_pixels: u64) -> Result<Output> {
     params.validate()?;
-    let invalid = || Failure(StatusCode::UNPROCESSABLE_ENTITY, "invalid_image");
-    let format = image::guess_format(bytes).map_err(|_| invalid())?;
-    if !matches!(
-        format,
-        ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP
-    ) {
-        return Err(Failure(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "unsupported_image_format",
-        ));
+    let source = source_format(bytes).ok_or(Failure(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "unsupported_image_format",
+    ))?;
+    let failed = || Failure(StatusCode::UNPROCESSABLE_ENTITY, "invalid_image");
+    let directory = tempfile::tempdir().map_err(|_| Failure::upstream("worker_unavailable"))?;
+    let input = directory.path().join(format!("input.{source}"));
+    let output = directory.path().join("output");
+    std::fs::File::create(&input)
+        .and_then(|mut f| f.write_all(bytes))
+        .map_err(|_| failed())?;
+    let worker = std::env::var_os("IMAGE_PROCESSOR_WORKER")
+        .unwrap_or_else(|| "/usr/local/bin/image-worker".into());
+    let result = Command::new(worker)
+        .arg(&input)
+        .arg(&output)
+        .args([
+            params.w.to_string(),
+            params.h.to_string(),
+            params.quality().to_string(),
+            params.r.to_string(),
+            params.f.clone().unwrap_or_else(|| "source".into()),
+            source.into(),
+            max_pixels.to_string(),
+        ])
+        .env("VIPS_CONCURRENCY", "1")
+        .env("MAGICK_THREAD_LIMIT", "1")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| Failure::upstream("worker_unavailable"))?;
+    if !result.status.success() {
+        return Err(match result.status.code() {
+            Some(5) => Failure(StatusCode::PAYLOAD_TOO_LARGE, "source_pixel_limit"),
+            Some(6) => Failure(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_conversion"),
+            None => Failure(StatusCode::UNPROCESSABLE_ENTITY, "processing_limit"),
+            _ => failed(),
+        });
     }
-    let animated = match format {
-        ImageFormat::WebP => image::codecs::webp::WebPDecoder::new(Cursor::new(bytes))
-            .map_err(|_| invalid())?
-            .has_animation(),
-        ImageFormat::Png => image::codecs::png::PngDecoder::new(Cursor::new(bytes))
-            .map_err(|_| invalid())?
-            .is_apng()
-            .map_err(|_| invalid())?,
-        _ => false,
-    };
-    if animated {
-        return Err(Failure(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "animated_image_not_supported",
-        ));
+    let info = String::from_utf8(result.stdout).map_err(|_| failed())?;
+    let parts: Vec<_> = info.split_whitespace().collect();
+    if parts.len() != 3 {
+        return Err(failed());
     }
-    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(32768);
-    limits.max_image_height = Some(32768);
-    limits.max_alloc = Some(256 * 1024 * 1024);
-    reader.limits(limits);
-    let mut decoder = reader.into_decoder().map_err(|_| invalid())?;
-    let (width, height) = decoder.dimensions();
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > max_pixels {
-        return Err(Failure(StatusCode::PAYLOAD_TOO_LARGE, "source_pixel_limit"));
-    }
-    let orientation = decoder.orientation().map_err(|_| invalid())?;
-    let mut image = DynamicImage::from_decoder(decoder).map_err(|_| invalid())?;
-    image.apply_orientation(orientation);
-    let image = match params.fit {
-        Fit::Fill => {
-            // image 的滤波先纵向采样，浮点中间图宽度仍是原宽；同时限制中间
-            // 像素数，不能只检查输入和最终输出尺寸。
-            if u64::from(image.width()) * u64::from(params.height) > max_pixels {
-                return Err(Failure(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "intermediate_pixel_limit",
-                ));
-            }
-            image.resize_exact(params.width, params.height, FilterType::Lanczos3)
-        }
-        Fit::Contain => image.resize(
-            params.width.min(image.width()),
-            params.height.min(image.height()),
-            FilterType::Lanczos3,
-        ),
-        Fit::Cover => {
-            // 先裁原图再缩放；resize_to_fill 会先放大整幅长图，极端宽高比可能
-            // 产生远超最终 1920×1920 的中间缓冲区。交叉乘积用 u64 防溢出。
-            let (w, h) = (image.width(), image.height());
-            let (cw, ch) = if u64::from(w) * u64::from(params.height)
-                > u64::from(h) * u64::from(params.width)
-            {
-                (
-                    (u64::from(h) * u64::from(params.width) / u64::from(params.height)).max(1)
-                        as u32,
-                    h,
-                )
-            } else {
-                (
-                    w,
-                    (u64::from(w) * u64::from(params.height) / u64::from(params.width)).max(1)
-                        as u32,
-                )
-            };
-            image
-                .crop_imm((w - cw) / 2, (h - ch) / 2, cw, ch)
-                .resize_exact(params.width, params.height, FilterType::Lanczos3)
-        }
+    let mime = match parts[2] {
+        "image/jpeg" => "image/jpeg",
+        "image/png" => "image/png",
+        "image/webp" => "image/webp",
+        "image/gif" => "image/gif",
+        "image/tiff" => "image/tiff",
+        "image/bmp" => "image/bmp",
+        "image/heic" => "image/heic",
+        "image/avif" => "image/avif",
+        _ => return Err(failed()),
     };
-    let (width, height) = (image.width(), image.height());
-    let output_format = params.format.unwrap_or(match format {
-        ImageFormat::Jpeg => Format::Jpg,
-        ImageFormat::WebP => Format::Webp,
-        _ => Format::Png,
-    });
-    let mut output = Vec::new();
-    let failed = |_| Failure(StatusCode::UNPROCESSABLE_ENTITY, "image_encode_failed");
-    let content_type = match output_format {
-        Format::Jpg => {
-            // JPEG 不支持透明度；先合成白底，避免透明区域意外变黑。
-            let rgba = image.to_rgba8();
-            let mut rgb = image::RgbImage::new(width, height);
-            for (dst, src) in rgb.pixels_mut().zip(rgba.pixels()) {
-                let a = u32::from(src[3]);
-                for channel in 0..3 {
-                    dst[channel] =
-                        ((u32::from(src[channel]) * a + 255 * (255 - a) + 127) / 255) as u8;
-                }
-            }
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, params.quality)
-                .encode(rgb.as_raw(), width, height, image::ExtendedColorType::Rgb8)
-                .map_err(failed)?;
-            "image/jpeg"
-        }
-        Format::Png => {
-            let rgba = image.to_rgba8();
-            image::codecs::png::PngEncoder::new(&mut output)
-                .write_image(
-                    rgba.as_raw(),
-                    width,
-                    height,
-                    image::ExtendedColorType::Rgba8,
-                )
-                .map_err(failed)?;
-            "image/png"
-        }
-        Format::Webp => {
-            let rgba = image.to_rgba8();
-            // 使用 libwebp 有损编码，质量参数真正参与编码；PNG 则始终无损。
-            output = webp::Encoder::from_rgba(rgba.as_raw(), width, height)
-                .encode(f32::from(params.quality))
-                .to_vec();
-            "image/webp"
-        }
-    };
-    if output.len() > 20 * 1024 * 1024 {
-        return Err(Failure(StatusCode::PAYLOAD_TOO_LARGE, "output_too_large"));
+    let bytes = std::fs::read(output).map_err(|_| failed())?;
+    if bytes.is_empty() || bytes.len() > 20 * 1024 * 1024 {
+        return Err(failed());
     }
     Ok(Output {
-        bytes: output,
-        content_type,
-        width,
-        height,
+        bytes,
+        content_type: mime,
+        width: parts[0].parse().map_err(|_| failed())?,
+        height: parts[1].parse().map_err(|_| failed())?,
     })
 }

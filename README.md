@@ -1,6 +1,6 @@
 # Image Processor
 
-独立的 Rust 图片处理服务，供 EasOS File 的 MinIO / S3 外部图片处理地址调用。项目、构建和部署独立于 EasOS；不是 MOD，不需要访问 EasOS 数据库，也不持有存储 AK/SK。原图只在单次请求中读取，不在本地保存或后台同步。
+独立的 Rust 图片处理服务，供 EasOS File 的 MinIO / S3 外部图片处理地址调用。项目、构建和部署独立于 EasOS；不是 MOD，不需要访问 EasOS 数据库，也不持有存储 AK/SK。原图仅在远端单次请求的私有临时目录处理；处理结果使用有界内存缓存，不后台同步。
 
 - [接口和边界](docs/protocol.md)
 - [目标服务器 HTTPS 部署与 EasOS 接入](deploy/https/README.md)
@@ -14,6 +14,7 @@
 ```sh
 cargo fmt --check
 CARGO_BUILD_JOBS=2 cargo clippy --all-targets --locked -- -D warnings
+# 需目标Linux的libvips/MagickWand和image-worker，见Dockerfile；不在Mac部署依赖
 CARGO_BUILD_JOBS=2 cargo test --locked
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```

@@ -1,4 +1,5 @@
 use crate::{
+    cache::Cache,
     config::Config,
     error::{Failure, Result},
     source,
@@ -13,7 +14,7 @@ use axum::{
     routing::get,
 };
 use std::{sync::Arc, time::Instant};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 #[derive(Clone)]
@@ -21,6 +22,7 @@ struct App {
     config: Arc<Config>,
     client: reqwest::Client,
     slots: Arc<Semaphore>,
+    cache: Arc<Mutex<Cache>>,
 }
 
 /// 只记录随机请求号、阶段、错误码、计数和耗时；禁止记录 URI、原图地址、签名或正文。
@@ -83,6 +85,7 @@ pub fn app(config: Config) -> std::result::Result<Router, String> {
     let state = App {
         slots: Arc::new(Semaphore::new(config.max_concurrent)),
         client,
+        cache: Arc::new(Mutex::new(Cache::default())),
         config: Arc::new(config),
     };
     Ok(Router::new()
@@ -93,7 +96,10 @@ pub fn app(config: Config) -> std::result::Result<Router, String> {
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(origins))
                 .allow_methods([Method::GET, Method::HEAD])
-                .expose_headers(["x-request-id".parse().unwrap()]),
+                .expose_headers([
+                    "x-request-id".parse().unwrap(),
+                    "x-image-cache".parse().unwrap(),
+                ]),
         ))
 }
 async fn process(State(state): State<App>, RawQuery(query): RawQuery) -> Response {
@@ -136,19 +142,46 @@ async fn execute(state: App, query: Option<String>, op: &mut Operation) -> Resul
         .try_acquire_owned()
         .map_err(|_| Failure(StatusCode::SERVICE_UNAVAILABLE, "busy"))?;
     op.stage = "fetch";
-    let bytes = source::fetch(&state.client, &state.config, &params.url).await?;
-    tracing::info!(request_id=%op.id,event="source_read",bytes=bytes.len(),"原图读取完成");
-    op.stage = "transform";
-    let max_pixels = state.config.max_input_pixels;
-    let output = tokio::task::spawn_blocking(move || {
-        let _slot = slot;
-        transform::transform(&bytes, &params, max_pixels)
-    })
-    .await
-    .map_err(|_| Failure(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))??;
-    tracing::info!(request_id=%op.id,event="image_encoded",bytes=output.bytes.len(),width=output.width,height=output.height,"图片编码完成");
+    let key = Cache::key(&params);
+    let cached = state.cache.lock().await.get(&key);
+    let fetched = source::fetch(
+        &state.client,
+        &state.config,
+        &params.url,
+        cached.as_ref().map(|e| e.etag.as_str()),
+    )
+    .await?;
+    let (output, cache_status) = match fetched {
+        source::Fetched::Unchanged => (
+            cached.expect("conditional request has cache entry").output,
+            "HIT",
+        ),
+        source::Fetched::Modified { bytes, etag } => {
+            tracing::info!(request_id=%op.id,event="source_read",bytes=bytes.len(),"原图读取完成");
+            op.stage = "transform";
+            let max_pixels = state.config.max_input_pixels;
+            let output = Arc::new(
+                tokio::task::spawn_blocking(move || {
+                    let _slot = slot;
+                    transform::transform(&bytes, &params, max_pixels)
+                })
+                .await
+                .map_err(|_| Failure(StatusCode::INTERNAL_SERVER_ERROR, "worker_failed"))??,
+            );
+            tracing::info!(request_id=%op.id,event="image_encoded",bytes=output.bytes.len(),width=output.width,height=output.height,"图片编码完成");
+            let status = if let Some(etag) = etag {
+                state.cache.lock().await.put(key, etag, output.clone());
+                "MISS"
+            } else {
+                "BYPASS"
+            };
+            (output, status)
+        }
+    };
+    tracing::info!(request_id=%op.id,event="cache_result",cache=cache_status,"处理缓存检查完成");
     Ok(Response::builder()
         .header("content-type", output.content_type)
-        .body(Body::from(output.bytes))
+        .header("x-image-cache", cache_status)
+        .body(Body::from(output.bytes.clone()))
         .unwrap())
 }
