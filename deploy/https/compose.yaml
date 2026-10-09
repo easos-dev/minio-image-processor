@@ -10,9 +10,9 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    tmpfs: ["/tmp:size=512m,mode=1777"]
-    mem_limit: 2g
-    cpus: 2
+    tmpfs: ["/tmp:size=1g,mode=1777"]
+    # 8GiB目标主机预留2GiB给MinIO、Nginx和系统；CPU由进程读取实际可用核数。
+    mem_limit: 6g
     pids_limit: 128
     volumes:
       - ./generated/config.toml:/etc/image-processor/config.toml:ro

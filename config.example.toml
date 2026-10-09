@@ -2,7 +2,8 @@ listen = "0.0.0.0:8080"
 allowed_origins = ["http://127.0.0.1:18080"]
 max_input_bytes = 104857600
 max_input_pixels = 250000000
-max_concurrent = 2
+# 0：按实际CPU和容器内存自动计算；正整数仍受内存预算约束。
+max_concurrent = 0
 fetch_timeout_seconds = 20
 
 [[sources]]

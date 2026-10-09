@@ -1,4 +1,5 @@
 use crate::{
+    admission::Admission,
     cache::Cache,
     config::Config,
     error::{Failure, Result},
@@ -14,14 +15,14 @@ use axum::{
     routing::get,
 };
 use std::{sync::Arc, time::Instant};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 #[derive(Clone)]
 struct App {
     config: Arc<Config>,
     client: reqwest::Client,
-    slots: Arc<Semaphore>,
+    admission: Arc<Admission>,
     cache: Arc<Mutex<Cache>>,
 }
 
@@ -82,8 +83,19 @@ pub fn app(config: Config) -> std::result::Result<Router, String> {
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|_| "HTTP 客户端初始化失败".to_owned())?;
+    let workers = config.effective_concurrency();
+    tracing::info!(
+        event = "admission_config",
+        workers,
+        max_waiting = 256,
+        "图片处理并发预算已确定"
+    );
     let state = App {
-        slots: Arc::new(Semaphore::new(config.max_concurrent)),
+        admission: Arc::new(Admission::new(
+            workers,
+            256,
+            std::time::Duration::from_secs(45),
+        )),
         client,
         cache: Arc::new(Mutex::new(Cache::default())),
         config: Arc::new(config),
@@ -104,7 +116,13 @@ pub fn app(config: Config) -> std::result::Result<Router, String> {
 }
 async fn process(State(state): State<App>, RawQuery(query): RawQuery) -> Response {
     let mut op = Operation::new();
-    let result = execute(state, query, &mut op).await;
+    // 整个请求含排队最多55秒，在Nginx现有60秒读取时限内返回明确错误。
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(55),
+        execute(state, query, &mut op),
+    )
+    .await
+    .unwrap_or(Err(Failure(StatusCode::GATEWAY_TIMEOUT, "request_timeout")));
     op.finish(&result);
     let mut response = match result {
         Ok(response) => response,
@@ -134,13 +152,10 @@ async fn execute(state: App, query: Option<String>, op: &mut Operation) -> Resul
         serde_urlencoded::from_str(&query).map_err(|_| Failure::invalid("invalid_parameters"))?;
     params.validate()?;
     source::target(&params.url, &state.config.sources)?;
-    // 不排队积压；下载和编码共享名额。CPU 工作一旦开始，名额由工作闭包持有，
-    // 即使调用者取消也不会提前释放，让后续请求突破并发和内存上限。
-    let slot = state
-        .slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| Failure(StatusCode::SERVICE_UNAVAILABLE, "busy"))?;
+    op.stage = "queue";
+    let queued = Instant::now();
+    let slot = state.admission.acquire().await?;
+    tracing::info!(request_id=%op.id,event="request_admitted",wait_ms=queued.elapsed().as_millis() as u64,"图片处理请求取得名额");
     op.stage = "fetch";
     let key = Cache::key(&params);
     let cached = state.cache.lock().await.get(&key);

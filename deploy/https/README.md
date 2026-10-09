@@ -33,7 +33,7 @@ docker compose up -d image-processor gateway
 
 生成器拒绝覆盖已有 generated/secrets/.env。应用 AK/SK 为独立凭据，权限仅限专用私有桶，文件 0600；根凭据只挂载给一次性 bootstrap，不能交给 EasOS。已有同名桶使 bootstrap 停止，避免接管数据；中断后检查阶段并手动续做，禁止删除凭据再初始化。已有部署只审查并更新配置、重建所需服务，不再次 bootstrap。
 
-处理器使用镜像内 nobody 身份、只读文件系统与资源限制；图片临时文件仅放在远端512MiB tmpfs，缓存为有界内存；Nginx 的临时目录也使用 tmpfs。没有业务轮询、同步、自动重试或重启循环。`docker compose stop` 仅停止本目录服务；不删除共享网络或 MinIO 卷。
+处理器使用镜像内 nobody 身份、只读文件系统与资源限制；图片临时文件仅放在远端1GiB tmpfs，缓存为有界内存；Nginx 的临时目录也使用 tmpfs。默认max_concurrent=0，按CPU及内存预算自动选择并发，额外请求在当前HTTP连接中有界等待；当前8核/8GiB主机给处理器6GiB，自动得到5个并发。没有业务轮询、同步、自动重试或重启循环。`docker compose stop` 仅停止本目录服务；不删除共享网络或 MinIO 卷。
 
 网关不记录含签名 URI 的 access/error 日志；启动配置错误仍可见。处理器保留脱敏阶段和终态日志，不输出源地址或凭据。固定 MinIO 社区版本的桶 CORS 是空实现，因此 CORS 由 Nginx 精确管理：只允许配置的 GUI origin、GET/HEAD/PUT 和必要请求头，并清除上游宽泛 CORS。generated/cors.xml 仅供支持该功能的其他 S3 服务参考。
 

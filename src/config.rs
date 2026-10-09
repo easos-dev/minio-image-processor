@@ -34,7 +34,7 @@ fn input_pixels() -> u64 {
     250_000_000
 }
 fn workers() -> usize {
-    2
+    0
 }
 fn timeout() -> u64 {
     20
@@ -60,7 +60,7 @@ impl Config {
         {
             return Err("须明确配置来源存储及浏览器来源");
         }
-        if !(1..=4).contains(&self.max_concurrent)
+        if self.max_concurrent > 128
             || !(1..=60).contains(&self.fetch_timeout_seconds)
             || !(1..=100 * 1024 * 1024).contains(&self.max_input_bytes)
             || !(1..=250_000_000).contains(&self.max_input_pixels)
@@ -88,7 +88,60 @@ impl Config {
         }
         Ok(())
     }
+    /// 0表示按可用CPU自动选择；显式值也受内存上限约束，避免容器OOM影响整页。
+    pub fn effective_concurrency(&self) -> usize {
+        let cpus = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1);
+        concurrency(self.max_concurrent, cpus, memory_budget())
+    }
     pub fn fetch_timeout(&self) -> Duration {
         Duration::from_secs(self.fetch_timeout_seconds)
+    }
+}
+
+/// 每个worker最多768MiB地址空间，加原图缓冲/tmpfs约1GiB；另留512MiB给缓存和运行时。
+fn concurrency(configured: usize, cpus: usize, memory: u64) -> usize {
+    let memory_slots = memory.saturating_sub(512 * 1024 * 1024) / (1024 * 1024 * 1024);
+    let requested = if configured == 0 { cpus } else { configured };
+    requested.clamp(1, 128).min(memory_slots.max(1) as usize)
+}
+fn memory_budget() -> u64 {
+    let physical = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
+        s.lines().find_map(|line| {
+            line.strip_prefix("MemTotal:")
+                .and_then(|v| v.split_whitespace().next())
+                .and_then(|v| v.parse::<u64>().ok())
+                .and_then(|kb| kb.checked_mul(1024))
+        })
+    });
+    // cgroup v2（当前Docker部署）和v1的固定只读资源文件，绝不读取环境凭据。
+    let cgroup = [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .into_iter()
+    .filter_map(|path| std::fs::read_to_string(path).ok())
+    .filter_map(|s| s.trim().parse::<u64>().ok())
+    .filter(|v| *v > 0)
+    .min();
+    physical
+        .into_iter()
+        .chain(cgroup)
+        .min()
+        .unwrap_or(2 * 1024 * 1024 * 1024)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn automatic_workers_follow_cpu_and_container_memory_limits() {
+        let gib = 1024 * 1024 * 1024;
+        assert_eq!(concurrency(0, 8, 6 * gib), 5);
+        assert_eq!(concurrency(0, 2, 16 * gib), 2);
+        assert_eq!(concurrency(0, 32, 2 * gib), 1);
+        assert_eq!(concurrency(3, 8, 6 * gib), 3);
+        assert_eq!(concurrency(100, 8, 6 * gib), 5);
+        assert_eq!(concurrency(0, 0, 1), 1);
     }
 }

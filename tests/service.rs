@@ -205,7 +205,7 @@ fn configuration_is_explicit_and_rejects_credentials() {
     c.sources[0].path_prefix = "/bucket/../".into();
     assert!(c.validate().is_err());
     c = config("http://minio:9000");
-    c.max_concurrent = 20;
+    c.max_concurrent = 129;
     assert!(c.validate().is_err());
     c = config("http://minio:9000");
     c.allowed_origins = vec!["*".into()];
@@ -329,12 +329,16 @@ async fn timeout_busy_and_cancel_release_async_download_permit() {
         "",
     ));
     entered.notified().await;
-    assert_eq!(
-        request(app.clone(), "https://objects.example.test/bucket/b", "")
-            .await
-            .status(),
-        503
-    );
+    // 第二个请求等待，取消后不得触发回源；第一个取消后必须释放工作名额。
+    let queued = tokio::spawn(request(
+        app.clone(),
+        "https://objects.example.test/bucket/b",
+        "",
+    ));
+    tokio::task::yield_now().await;
+    assert!(!queued.is_finished());
+    queued.abort();
+    assert!(queued.await.unwrap_err().is_cancelled());
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
     assert_eq!(
@@ -513,4 +517,50 @@ fn high_resolution_photo_uses_oss_pixel_admission_without_removing_budget() {
     let mut invalid = c;
     invalid.max_input_pixels = 250_000_001;
     assert!(invalid.validate().is_err());
+}
+
+#[tokio::test]
+async fn cold_page_burst_waits_within_worker_budget_and_does_not_retry() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let hits = Arc::new(AtomicUsize::new(0));
+    let (a, p, h) = (active.clone(), peak.clone(), hits.clone());
+    let server = serve(Router::new().fallback(get(move || {
+        let (a, p, h) = (a.clone(), p.clone(), h.clone());
+        async move {
+            h.fetch_add(1, Ordering::SeqCst);
+            let n = a.fetch_add(1, Ordering::SeqCst) + 1;
+            p.fetch_max(n, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            a.fetch_sub(1, Ordering::SeqCst);
+            png(80, 60)
+        }
+    })))
+    .await;
+    let app = web::app(config(&server.origin)).unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    for i in 0..24 {
+        let app = app.clone();
+        tasks.spawn(async move {
+            let response = request(
+                app,
+                &format!("https://objects.example.test/bucket/{i}"),
+                "w=40&h=30&f=webp",
+            )
+            .await;
+            assert_eq!(response.status(), 200);
+            assert_eq!(
+                image::load_from_memory(&body(response).await)
+                    .unwrap()
+                    .width(),
+                40
+            );
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 24);
+    assert!(peak.load(Ordering::SeqCst) <= 2);
 }

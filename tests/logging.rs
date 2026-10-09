@@ -110,8 +110,13 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
             .status(),
         502
     );
-    let cancellation = tokio::spawn(app.oneshot(request("cancel")));
+    let cancellation = tokio::spawn(app.clone().oneshot(request("cancel")));
     entered.notified().await;
+    // 工作名额被占用时取消等待者，须有queue阶段终态且不触发额外回源。
+    let queued = tokio::spawn(app.oneshot(request("ok")));
+    tokio::task::yield_now().await;
+    queued.abort();
+    assert!(queued.await.unwrap_err().is_cancelled());
     cancellation.abort();
     assert!(cancellation.await.unwrap_err().is_cancelled());
     server_task.abort();
@@ -131,8 +136,8 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
         .iter()
         .filter(|e| e["fields"]["event"] == "request_end")
         .collect();
-    assert_eq!(starts.len(), 3);
-    assert_eq!(ends.len(), 3);
+    assert_eq!(starts.len(), 4);
+    assert_eq!(ends.len(), 4);
     for start in starts {
         assert_eq!(
             ends.iter()
@@ -141,6 +146,10 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
             1
         );
     }
+    assert!(
+        ends.iter()
+            .any(|e| e["fields"]["status"] == "cancelled" && e["fields"]["stage"] == "queue")
+    );
     for status in ["ok", "failed", "cancelled"] {
         assert!(ends.iter().any(|e| e["fields"]["status"] == status));
     }

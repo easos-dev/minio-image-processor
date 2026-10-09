@@ -28,6 +28,7 @@ class PrepareTests(unittest.TestCase):
             self.assertEqual(conf['allowed_origins'], ['http://127.0.0.1:18080'])
             example = tomllib.loads((Path(__file__).resolve().parents[1]/'config.example.toml').read_text())
             self.assertEqual(conf['max_input_pixels'], example['max_input_pixels'])
+            self.assertEqual(conf['max_concurrent'], 0)
             bucket = tomllib.loads((base/'generated/easos-bucket.example.toml').read_text())['buckets'][0]
             self.assertEqual(bucket['image_processor']['host'], '33.79.0.35:8443')
             self.assertEqual(bucket['download']['host'], '33.79.0.35')
