@@ -47,9 +47,9 @@ docker compose up -d image-processor gateway
 3. 拉取新代码后 `docker compose build image-processor && docker compose up -d image-processor gateway`，再 `docker compose run --rm --no-deps --entrypoint nginx gateway -t` 校验配置。
 4. EasOS 侧：桶配置删掉图片处理地址（EasOS 升级时自动清除），下载域名保持 `33.79.0.35`。
 
-### 已发布对象的匿名读取（待决定）
+### 不带签名的读取
 
-EasOS File 发布对象时先匿名 HEAD 探测，不通才对 MinIO 发 `PUT ?acl`（`x-amz-acl: public-read`）。MinIO 不支持对象级 ACL：本地实测 MinIO（RELEASE.2025-10-15 源码构建）对该请求返回 501 `NotImplemented`，之后匿名读取仍是 403，所以在当前私有桶上发布会失败。要让 EasOS 在 MinIO 上发布成功，只能给对象前缀加桶级匿名只读策略（例如 `mc anonymous set download storage/easos-preview/easos`），代价是同前缀下尚未发布的对象只要知道对象名也能匿名读取。bootstrap 不会自动加这条策略，是否接受由使用者决定。
+网关是无状态的转换层，不持任何凭据与授权，请求带着自己的签名原样转给 MinIO。所以能不能不带签名读，完全由 MinIO 桶本身的权限决定：桶是公开读时，不带签名经网关就能读；桶是私有时只能带签名读，和直连 MinIO 一样。EasOS File 不设置、不修改任何桶或对象的 ACL（MinIO 也不支持对象级 ACL，`PUT ?acl` 返回 501），读不到就是读不到，File 的“测试连接”会照实报错。EasOS 的媒体地址是不带签名的稳定地址，所以要让 EasOS 在 MinIO 上显示图片，需要部署者自己决定把桶（或对象前缀）设成公开读；bootstrap 不替部署者做这件事。
 
 ## HTTPS 与真实 S3 验收
 

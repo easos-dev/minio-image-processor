@@ -16,7 +16,7 @@ MinIO 由官方源码提交 `9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a`（RELEASE
 - `scripts/smoke.py --direct --public-prefix public/` 全部阶段通过：经网关的预签名条件 PUT 与重复 412、MD5 拒绝；预签名 GET 与上传内容、与直连 MinIO 逐字节一致；Range 206、单独签名的 HEAD、If-None-Match 304、匿名与篡改签名 403；把 x-oss-process 签进 URL 后 EasOS 两条处理串分别得到 256×192 与 64×64 的 WebP（长度不同），换签名再取为 HIT 且字节一致，ETag 沿用原对象；签名后再追加处理串被 MinIO 以签名不符拒绝，匿名读私有对象 403；OSS 参数错误码；匿名前缀下不带参数返回原图、带参数返回加工结果。
 - OSS 对照：OSS 官方公开示例图（example.jpg、f.jpg、panda.png）的同字节副本放进 MinIO，184 条处理串分别发给 OSS 与网关，比对状态码、错误 Code/EC、输出类型和像素尺寸，183 条一致；唯一不同是网关不提供的 watermark。average-hue 算法不同，数值不比（见 [接口文档](protocol.md#与-oss-的已知差异)）。
 - MinIO 健康端点经网关返回 200；网关近千行日志里没有签名参数、桶名、上游地址或处理串。
-- MinIO 对 `PUT ?acl`（`x-amz-acl: public-read`）返回 501 `NotImplemented`，匿名读取仍为 403。EasOS File 的发布流程依赖对象级公开读，这在 MinIO 上不成立，见 [部署说明](../deploy/https/README.md#已发布对象的匿名读取待决定)。
+- MinIO 对 `PUT ?acl`（`x-amz-acl: public-read`）返回 501 `NotImplemented`。这与网关无关：EasOS File 不设置任何 ACL（2026-10-18 起），能否不带签名读取由 MinIO 桶本身的权限决定，见 [部署说明](../deploy/https/README.md#不带签名的读取)。
 
 ## 未覆盖边界
 
