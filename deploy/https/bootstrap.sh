@@ -1,6 +1,6 @@
 #!/bin/sh
 # 在受信目标服务器显式运行一次，不开启 trace，不将 mc 原始输出送入日志。
-# 根凭据仅用于初始化；EasOS 只拿专用桶用户，图片处理器只接收短期 GET URL。
+# 根凭据仅用于初始化；EasOS 只拿专用桶用户，图片处理网关不持有任何凭据。
 set -eu
 umask 077
 root_user=$(cat /setup/minio-secrets/minio_root_user)

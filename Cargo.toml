@@ -12,10 +12,8 @@ sha2 = "0.10"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_urlencoded = "0.7"
 toml = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
-tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 url = "2"

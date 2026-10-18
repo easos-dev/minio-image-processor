@@ -1,5 +1,6 @@
 # 部署准备：在目标 Linux 服务器执行，不在本机启动。
 # 复用已存在的 MinIO 网络与数据卷，不重新部署/重启 MinIO。
+# 链路：Nginx 443（TLS、CORS、只开放专用桶）→ image-processor:8080（原样转发 + OSS 图片处理）→ minio:9000。
 name: image-processor-http
 services:
   image-processor:
@@ -23,7 +24,7 @@ services:
   gateway:
     image: nginx:stable-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
     entrypoint: ["nginx", "-g", "daemon off;"]
-    ports: ["443:443", "8443:8443"]
+    ports: ["443:443"]
     read_only: true
     security_opt: [no-new-privileges:true]
     tmpfs: [/tmp, /var/cache/nginx]

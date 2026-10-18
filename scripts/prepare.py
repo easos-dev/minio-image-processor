@@ -44,7 +44,6 @@ def write(path, data, mode=0o644):
 
 def prepare(base, public_host, bucket, origins, minio_secrets, network):
     public_host = host(public_host)
-    storage, processor = public_host, public_host + ":8443"
     if not re.fullmatch(r'[a-z][a-z0-9-]{1,48}[a-z0-9]', bucket):
         raise ValueError('桶名须为 3–50 位小写字母、数字和短横线')
     origins = list(dict.fromkeys(origin(x) for x in origins))
@@ -64,22 +63,17 @@ def prepare(base, public_host, bucket, origins, minio_secrets, network):
     secret_dir.mkdir(mode=0o700)
     write(secret_dir / 'access_key', 'EASOS' + secrets.token_hex(8).upper() + '\n', 0o600)
     write(secret_dir / 'secret_key', secrets.token_hex(32) + '\n', 0o600)
-    # 配置没有秘密；允许容器内既有 nobody 身份读取。
-    write(generated / 'config.toml', f'''listen = "0.0.0.0:8080"
-allowed_origins = {json.dumps(origins)}
-max_input_bytes = 104857600
-max_input_pixels = 250000000
+    # 网关配置没有秘密；允许容器内既有 nobody 身份读取。网关把请求原样转给同网络 MinIO。
+    write(generated / 'config.toml', '''listen = "0.0.0.0:8080"
+upstream = "http://minio:9000"
 max_concurrent = 0
 fetch_timeout_seconds = 20
-[[sources]]
-origin = "https://{storage}"
-upstream = "http://minio:9000"
-path_prefix = "/{bucket}/"
 ''')
-    # 两个 TLS 端口分别承载 S3 与图片处理，保留 S3 Host、路径和签名查询。
+    # 443 只开放专用桶：TLS 与浏览器 CORS 在 Nginx，之后一律交给图片处理网关；网关原样转给 MinIO，
+    # 只在 GET 带 x-oss-process 时加工。保留原始 Host、路径和签名查询，S3 SigV4 才能通过。
     # 企业证书由运维单独安装，只读挂载；配置生成器不读取或生成私钥。
     cors_map = '\n        '.join(f'"{x}" "{x}";' for x in origins)
-    proxy_common = """proxy_set_header Host $http_host;
+    proxy = """proxy_set_header Host $http_host;
             proxy_set_header Connection "";
             proxy_http_version 1.1;
             proxy_next_upstream off;
@@ -94,16 +88,13 @@ path_prefix = "/{bucket}/"
             proxy_hide_header Access-Control-Allow-Headers;
             proxy_hide_header Access-Control-Expose-Headers;
             proxy_hide_header Access-Control-Max-Age;
-            proxy_hide_header Cache-Control;"""
-    def locations(upstream, matches):
-        return '\n'.join(f'''        location {match} {{
+            proxy_hide_header Vary;"""
+    locations = '\n'.join(f'''        location {match} {{
             if ($request_method = OPTIONS) {{ return 204; }}
-            {proxy_common}
-            proxy_pass http://{upstream};
-        }}''' for match in matches)
-    storage_locations = locations('minio:9000', [f'= /{bucket}', f'^~ /{bucket}/'])
-    image_locations = locations('image-processor:8080', ['= /', '= /healthz'])
-    write(generated / 'nginx.conf', f'''# 不记录访问 URI；查询参数携带短期存储签名。
+            {proxy}
+            proxy_pass http://image-processor:8080;
+        }}''' for match in (f'= /{bucket}', f'^~ /{bucket}/'))
+    write(generated / 'nginx.conf', f'''# 不记录访问 URI；查询参数可能携带短期存储签名。
 worker_processes auto;
 pid /tmp/nginx.pid;
 error_log /dev/null;
@@ -120,37 +111,32 @@ http {{
     ssl_certificate_key /etc/nginx/tls/server.key;
     ssl_protocols TLSv1.2 TLSv1.3;
     server_tokens off;
-    client_max_body_size 100m;
+    # 上传大小由 EasOS 与 MinIO 自己限制（EasOS 非图片上限可配到 10 GiB），网关入口不再另设上限。
+    client_max_body_size 0;
     large_client_header_buffers 4 32k;
+    # 与 EasOS File 文档列出的上游 CORS 要求一致；MinIO 社区版桶 CORS 是空实现，由这里统一给出。
     add_header Access-Control-Allow-Origin $allowed_origin always;
     add_header Access-Control-Allow-Methods "GET, HEAD, PUT" always;
-    add_header Access-Control-Allow-Headers "content-type, content-md5, if-none-match" always;
-    add_header Access-Control-Expose-Headers "ETag, Content-Type, X-Request-Id, X-Image-Cache" always;
+    add_header Access-Control-Allow-Headers "range, content-type, content-md5, cache-control, content-disposition, if-none-match, x-amz-checksum-crc64nvme" always;
+    add_header Access-Control-Expose-Headers "Content-Range, Accept-Ranges, ETag, Content-Length, Content-Type, X-Request-Id, X-Image-Cache" always;
     add_header Access-Control-Max-Age "300" always;
     add_header Vary Origin always;
-    add_header Cache-Control no-store always;
     add_header Referrer-Policy no-referrer always;
     add_header X-Content-Type-Options nosniff always;
     server {{
         listen 443 ssl;
         server_name {public_host};
-{storage_locations}
-        location / {{ return 404; }}
-    }}
-    server {{
-        listen 8443 ssl;
-        server_name {public_host};
-{image_locations}
+{locations}
         location / {{ return 404; }}
     }}
 }}
 ''')
     allowed = ''.join(f'<AllowedOrigin>{escape(x)}</AllowedOrigin>' for x in origins)
-    # 仅用于支持桶 CORS 的标准 S3；当前 MinIO 使用上面的网关配置。
+    # 仅用于支持桶 CORS 的标准 S3；当前 MinIO 使用上面的 Nginx 配置。
     write(generated / 'cors.xml', f'''<CORSConfiguration><CORSRule>{allowed}
 <AllowedMethod>GET</AllowedMethod><AllowedMethod>HEAD</AllowedMethod><AllowedMethod>PUT</AllowedMethod>
-<AllowedHeader>content-type</AllowedHeader><AllowedHeader>content-md5</AllowedHeader><AllowedHeader>if-none-match</AllowedHeader>
-<ExposeHeader>ETag</ExposeHeader><ExposeHeader>Content-Type</ExposeHeader><MaxAgeSeconds>300</MaxAgeSeconds>
+<AllowedHeader>range</AllowedHeader><AllowedHeader>content-type</AllowedHeader><AllowedHeader>content-md5</AllowedHeader><AllowedHeader>cache-control</AllowedHeader><AllowedHeader>content-disposition</AllowedHeader><AllowedHeader>if-none-match</AllowedHeader><AllowedHeader>x-amz-checksum-crc64nvme</AllowedHeader>
+<ExposeHeader>Content-Range</ExposeHeader><ExposeHeader>Accept-Ranges</ExposeHeader><ExposeHeader>ETag</ExposeHeader><ExposeHeader>Content-Length</ExposeHeader><ExposeHeader>X-Image-Cache</ExposeHeader><MaxAgeSeconds>300</MaxAgeSeconds>
 </CORSRule></CORSConfiguration>
 ''')
     policy = {'Version': '2012-10-17', 'Statement': [
@@ -160,7 +146,7 @@ http {{
     write(generated / 'policy.json', json.dumps(policy, indent=2) + '\n')
     write(base / '.env', f'BUCKET={bucket}\nMINIO_SECRETS_DIR={minio_secrets}\nMINIO_NETWORK={network}\n', 0o600)
     write(generated / 'easos-bucket.example.toml', f'''# 手工加入 File 配置或通过配置页面录入。不要覆盖整个现有 config.toml。
-# 此示例无凭据。只用于独立开发实例新桶；既有记录仍引用原桶。
+# 此示例无凭据。下载域名就是图片处理网关入口（MinIO 前置网关），没有单独的图片处理地址。
 [[buckets]]
 key = "minio_preview"
 name = "MinIO Preview"
@@ -168,20 +154,18 @@ provider = "minio"
 bucket = "{bucket}"
 region = "us-east-1"
 path_style = true
+object_prefix = "easos"
 access_key_id = "REPLACE_FROM_secrets/access_key"
 access_key_secret = "REPLACE_FROM_secrets/secret_key"
-acceleration_excluded_regions = []
-server = {{ https = true, host = "{storage}" }}
-upload = {{ https = true, host = "{storage}" }}
-accelerated_upload = {{ https = true, host = "" }}
-download = {{ https = true, host = "{storage}" }}
-image_processor = {{ https = true, host = "{processor}" }}
+server = {{ https = true, host = "{public_host}" }}
+upload = {{ https = true, host = "{public_host}" }}
+download = {{ https = true, host = "{public_host}" }}
 ''')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', required=True, help='证书 SAN 中的 IPv4 或域名，443 为存储，8443 为图片处理')
+    parser.add_argument('--host', required=True, help='证书 SAN 中的 IPv4 或域名；443 是对象存储公开入口（经图片处理网关到 MinIO）')
     parser.add_argument('--bucket', default='easos-preview')
     parser.add_argument('--gui-origin', action='append', required=True)
     parser.add_argument('--minio-secrets-dir', required=True)

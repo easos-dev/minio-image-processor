@@ -1,49 +1,28 @@
 # 开发与部署验收
 
-本项目独立于 EasOS。当前常驻服务在 `33.79.0.35`：MinIO经Nginx 443，图片处理经Nginx 8443；Mac没有部署这些常驻服务。EasOS改动及运行验收只涉及独立工作树 `easos-codex` 和 `easos-preview-codex`（18080）。
+本项目独立于 EasOS。下面记录当前版本（MinIO 前置、与 OSS 同参数的图片处理网关）实际做过的检查与没覆盖的边界；旧版 `/?url=` 处理器的远端验收记录见 Git 历史中本文件的早期版本。
 
-## 当前处理协议与代码验证
+## 本机检查（2026-10-18）
 
-2026-10-08 的短参数/格式/缓存版本完成以下检查：
+- Mac（arm64）：`cargo fmt --check`、`cargo clippy --all-targets --locked -- -D warnings` 通过；31 项纯 Rust 单元测试通过（处理串解析与全部 OSS 错误码/EC/Message 用例、XML 错误版式、转发规则与逐跳头、签名识别与缓存键、info JSON 逐字节版式、缓存 LRU、准入队列、配置校验）；2 项部署生成器测试通过。
+- 生产镜像构建：`docker build` 按 Dockerfile 在 bookworm（libvips 8.14.1、libheif 1.15.1、ImageMagick 6.9.11）完成，C 子进程以 `-Wall -Wextra -Werror` 编译通过。本机是 arm64，目标服务器的 amd64 构建未在本机做。
+- 在上述构建阶段跑 `cargo test --locked`：52 项全部通过——31 项单元、9 项原生（tests/native.rs：对照 OSS 实测的 70 余条几何尺寸、顺时针旋转与白/透明角、九种格式与 Content-Type、透明合成、OSS 质量规则、EXIF 默认转正与去除、动图帧保留、info/average-hue、源图与输出限额及损坏图片的错误映射）、11 项 HTTP（tests/service.rs：loopback MinIO 桩下透传的路径/查询串/签名逐字、Host 与端到端头、逐跳头不转发、Range/206、HEAD、304、篡改签名 403、3 MiB 直传按 Content-Length 流式转发、分块上传、其他方法的查询串不动；匿名去掉 x-oss-process、签名请求保留；EasOS 两条处理串的尺寸、MISS→HIT、ETag 与对象头沿用、304 时对象头由缓存补齐、等价写法同键、处理请求忽略 Range、对象更新重编码、弱 ETag BYPASS；客户端条件请求由上游判断；上游 403/404 原样透传不重试；参数错误回源前返回；非图片与超 20 MB；回源超时与上游不可达；排队取消释放名额；24 张并发不超预算）、1 项日志（成功、上游 404、参数错误、排队取消四种终态成对，日志不含签名、Host、路径、处理串）。
+- 同样的 52 项也在 trixie 测试环境（libvips 8.16.1、libheif 1.23.4、ImageMagick 7.1.1）通过；C 子进程同时兼容 ImageMagick 6/7 的头文件路径。
 
-- Rust fmt、clippy（全部target、warnings拒绝）通过；C worker以 `-Wall -Wextra -Werror` 编译通过。
-- 目标Linux release下13项Rust测试全部通过（12项服务/变换、1项实际日志）：JPEG/PNG/BMP/GIF/WebP/TIFF/HEIC/AVIF输入输出、GIF与动画WebP帧预算、EXIF、透明、质量、三种缩放、不放大、SSRF/来源及签名Host保留、超时/并发/取消、缓存条件校验及安全日志。整组服务测试6.83秒。
-- 2项部署生成器测试通过；Nginx配置显式暴露X-Image-Cache，原生成器已有的两端口、秘密权限与拒绝覆盖检查保留。
-- EasOS `image-parity-20261008` 的13项质量门禁封存并验证；File全生命周期用例在独立PostgreSQL新建的专属临时数据库通过，结束后删除该数据库。夹具改为使用显式配置及manifest权限，移除了固定共享端口/容器依赖。
+## 真实 MinIO 联调（本机 Docker，2026-10-18）
 
-## 已构建、安装与真实链路
+MinIO 由官方源码提交 `9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a`（RELEASE.2025-10-15，与开发服务器同一版本）构建，网关用上面构建的生产镜像，按部署参数运行（只读根文件系统、1 GiB tmpfs、6 GiB 内存、128 进程、去掉全部能力），三者共用 loopback。全部数据为随机临时对象，结束清理。
 
-- 远端Linux amd64生产镜像构建、启动成功；只替换图片处理器，Nginx校验配置并重载。MinIO容器ID和启动时间前后相同。
-- 独立EasOS通过Kernel包升级安装File，保留配置和数据。安装二进制SHA256与构建产物一致：`2673ceca95b72d2e70f7c7de438da1346eb6b0c9309a251100345da3228368e9`。
-- 企业CA验证保持开启。真实S3 smoke通过条件PUT/重复412、MD5失败拒绝、HEAD/GET一致、匿名/篡改签名拒绝、精确CORS、管理路径及其他桶隔离、7种静态输出×3种缩放的21组转换和缓存二次命中；HEIC/AVIF解码尺寸由原生往返测试验证，smoke不把无法用Pillow解码当作通过。随机smoke对象已物理清理。
-- 完整File实际路径通过：公开SID请求返回302；合法w/h/q/r/f保留，非法值/未知字段/外来url丢弃；处理器从MinIO读取，第二次返回HIT且字节一致；d=1直接到MinIO原文件。
-- 隔离Chrome真实打开File地址，经302后解码显示128×64 WebP，HTTP200、X-Image-Cache=HIT。另核对File清理预览返回的远端PNG，浏览器显示320×200（原图较小，默认不放大）。没有关闭TLS验证或使用用户共享调试连接。
-- File链路测试只创建本任务随机目录的临时图片，结束通过File逻辑删除；物理字节遵循File现有PUT保护期和显式清理流程。上一轮取消的Chrome草稿同样保持过期，未提交业务订单。
+- `scripts/smoke.py --direct --public-prefix public/` 全部阶段通过：经网关的预签名条件 PUT 与重复 412、MD5 拒绝；预签名 GET 与上传内容、与直连 MinIO 逐字节一致；Range 206、单独签名的 HEAD、If-None-Match 304、匿名与篡改签名 403；把 x-oss-process 签进 URL 后 EasOS 两条处理串分别得到 256×192 与 64×64 的 WebP（长度不同），换签名再取为 HIT 且字节一致，ETag 沿用原对象；签名后再追加处理串被 MinIO 以签名不符拒绝，匿名读私有对象 403；OSS 参数错误码；匿名前缀下不带参数返回原图、带参数返回加工结果。
+- OSS 对照：OSS 官方公开示例图（example.jpg、f.jpg、panda.png）的同字节副本放进 MinIO，184 条处理串分别发给 OSS 与网关，比对状态码、错误 Code/EC、输出类型和像素尺寸，183 条一致；唯一不同是网关不提供的 watermark。average-hue 算法不同，数值不比（见 [接口文档](protocol.md#与-oss-的已知差异)）。
+- MinIO 健康端点经网关返回 200；网关近千行日志里没有签名参数、桶名、上游地址或处理串。
+- MinIO 对 `PUT ?acl`（`x-amz-acl: public-read`）返回 501 `NotImplemented`，匿名读取仍为 403。EasOS File 的发布流程依赖对象级公开读，这在 MinIO 上不成立，见 [部署说明](../deploy/https/README.md#已发布对象的匿名读取待决定)。
 
-## 性能样本
+## 未覆盖边界
 
-同一台服务器、1200万像素JPEG噪声样图、目标800×600。旧处理器WebP两次约1125/732ms，新版首次460ms、缓存命中12ms；JPEG旧版654/644ms，新版首次304ms、命中12ms。包含HTTPS及回源；当前JPEG来源的q还按OSS相对质量处理，与旧版绝对质量不同，因此这些是端到端样本，不是固定画质的编码器基准或压力测试。
+- 远端 `33.79.0.35` 仍运行旧版处理器（8443 端口、`/?url=` 接口）。本次没有部署、没有改远端 Nginx，也没有重跑远端 HTTPS smoke 与 CORS 检查；升级步骤见部署说明。远端 MinIO、历史照片迁入的对象（12228 条记录对应 6831 个去重文件）未受影响。
+- 未做 EasOS 完整链路（File 301 → 网关）、浏览器显示、独立 CDN、AWS S3 等其他上游，以及持续高负载压力测试。
+- HEIC/AVIF 只验证了小图编码与回读；接近 4096 边长的 HEIC/AVIF 编码在 768 MiB 子进程预算内能否完成未实测。
+- 未在示例桶上复现的 OSS 错误（源图超限、损坏、输出超限）其 Code/Message 由网关撰写，EC 取自 OSS 错误中心。
 
-此前HEIC在容器内按宿主机核数分配x265线程池导致超时；改为libheif显式单线程编码后格式回归通过。WebP采用原生libwebp、libvips缩小解码及有界缓存；没有手写编解码算法。
-
-## 高分辨率照片与迁移验收
-
-历史照片包含6000×4500与8192×5464原图；2400万像素默认预算会错误拒绝这些正常相机照片。默认配置、生成器和校验范围现统一为OSS的2.5亿像素准入上限，仍保留原生子进程内存/时间及输出预算。新增8192×5464 JPEG→320×240 WebP回归，明确覆盖旧预算拒绝、新预算成功和超预算配置拒绝；当前Linux原生14项Rust测试、2项生成器测试、Rust fmt/clippy通过。
-
-真实迁入JPEG/PNG/WebP及上述两张大图共5个样本，逐一核对原图MD5、File302、远端320×240裁切、缓存HIT与隔离Chrome解码；企业CA校验开启。实际高分辨率浏览器截图为`output/playwright/migrated-photo-high-resolution.png`。MinIO容器未重建或重启；本次仅更新处理器及Nginx上游解析。
-
-## 页面并发首次加载
-
-原服务仅2个工作名额且占满立即503，真实IKOI HOTEL 16房间照片同批请求仅4张成功、12张503。改为CPU/内存自动并发及有界请求等待后，当前8核/8GiB主机的6GiB容器自动得到5个工作名额。等待发生在原HTTP请求内，没有补发或自动重试；队列满、超时和取消仍有明确终态。
-
-Linux release的17项Rust测试覆盖自动资源预算、队列容量/超时/取消、24张不同图片并发全部成功且回源峰值不超过预算、每张仅一次回源，以及既有格式/缓存/鉴权边界。Rust fmt/clippy和2项生成器测试通过。隔离Chrome按File公开地址经真实302/CORS读取截图所涉16房间照片：处理器重启后首次16/16成功，约1.205秒全部完成；再次读取16/16缓存HIT，约170ms完成。每张照片只发一次fetch；检测页面只布置图片网格，未替代完整业务表单验收。首次批次中重复来源照片可复用同批先完成的处理结果。
-
-截图为`output/playwright/ikoi-first-load-fixed.png`；请求日志32次均为成功终态，实际等待最长199ms，未出现busy或queue_timeout。部署只重建图片处理器并重载Nginx，未重启MinIO或EasOS。
-
-## 保留边界
-
-对齐的是当前File短参数所覆盖的OSS语义和八种格式范围，不包含File没有定义的水印、旋转角度等全部OSS操作，不保证与OSS专有编码器逐字节相同。JPEG源质量为成熟量化表估计。默认输入像素准入上限2.5亿，与OSS一致，实际解码仍受独立内存/时间预算限制；HEIF输出采用8位像素，具体资源限制见[接口和边界](protocol.md)。缓存为进程内256MiB/512项、1小时，重启清空；命中仍校验当前签名和ETag。
-
-Chrome图片链路已通过，但本轮未重做完整业务表单、Safari/iPad触控、独立CDN、任意其他S3或持续高负载压力验收。独立环境的历史照片已迁入远端MinIO：12228条记录对应6831个去重文件（27551349440字节），原OSS保留；5条原本未完成上传且源端404的记录保持原样。迁移逐文件复读并验证大小、MD5、SHA-256，切换引用时比较完整数据库行，保留业务元数据。`deploy/development`部署文件未修改；MinIO容器和既有对象保留，仅向独立桶新增照片。
-
-源码测试、smoke、性能及浏览器的脱敏结果保存在 `.checks/`，截图在 `output/playwright/remote-image-chrome.png`；这些不是发布资产。原图/签名/凭据不进入Git。
+源码测试、联调与对照的过程输出未进 Git；原图、签名与凭据不进入仓库。

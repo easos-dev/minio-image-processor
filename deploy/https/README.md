@@ -2,16 +2,15 @@
 
 项目部署于 `33.79.0.35:/opt/image-processor`。全部构建和常驻服务在该服务器运行，Mac 仅保留源码。现有 MinIO 位于 `/opt/image-processor-dev`；本目录复用 `image-processor-dev` Docker 网络和 `minio:9000`，不重建其容器或数据卷。
 
-| 服务 | 对外入口 | Nginx 回源 |
-| --- | --- | --- |
-| MinIO S3 | `https://33.79.0.35:443` | `minio:9000` |
-| 图片处理 | `https://33.79.0.35:8443` | `image-processor:8080` |
+| 入口 | 链路 |
+| --- | --- |
+| `https://33.79.0.35:443` | Nginx（TLS、CORS、只开放专用桶）→ `image-processor:8080`（原样转发；GET 带 `x-oss-process` 时加工）→ `minio:9000` |
 
-两个监听均使用企业 CA 签发、SAN 包含该 IP 的服务证书。443 仅开放指定桶，8443 仅开放处理入口 `/` 和 `/healthz`；管理 API、Console、其他桶和其他路径返回 404。Nginx 保留原始 Host、路径和查询，确保 S3 SigV4 有效。
+只有这一个对外入口：EasOS 的控制、上传、下载域名都填它。443 仅开放指定桶，管理 API、Console、其他桶和其他路径返回 404。Nginx 与网关都保留原始 Host、路径和查询，S3 SigV4 签名在 MinIO 处校验；网关不持凭据、不签名。
 
 ## 首次部署
 
-以下命令在目标 Linux 项目目录执行，使用现有账户，不新建系统账户。服务器需有 Docker Compose 和 Python 3.11+。先核对 443/8443 空闲、现有 MinIO 网络及根凭据目录。
+以下命令在目标 Linux 项目目录执行，使用现有账户，不新建系统账户。服务器需有 Docker Compose 和 Python 3.11+。先核对 443 空闲、现有 MinIO 网络及根凭据目录。
 
 ```sh
 python3 scripts/prepare.py --host 33.79.0.35 \
@@ -33,9 +32,24 @@ docker compose up -d image-processor gateway
 
 生成器拒绝覆盖已有 generated/secrets/.env。应用 AK/SK 为独立凭据，权限仅限专用私有桶，文件 0600；根凭据只挂载给一次性 bootstrap，不能交给 EasOS。已有同名桶使 bootstrap 停止，避免接管数据；中断后检查阶段并手动续做，禁止删除凭据再初始化。已有部署只审查并更新配置、重建所需服务，不再次 bootstrap。
 
-处理器使用镜像内 nobody 身份、只读文件系统与资源限制；图片临时文件仅放在远端1GiB tmpfs，缓存为有界内存；Nginx 的临时目录也使用 tmpfs。默认max_concurrent=0，按CPU及内存预算自动选择并发，额外请求在当前HTTP连接中有界等待；当前8核/8GiB主机给处理器6GiB，自动得到5个并发。没有业务轮询、同步、自动重试或重启循环。`docker compose stop` 仅停止本目录服务；不删除共享网络或 MinIO 卷。
+处理器使用镜像内 nobody 身份、只读文件系统与资源限制；图片临时文件仅放在 1 GiB tmpfs，缓存为有界内存；Nginx 的临时目录也使用 tmpfs。默认 `max_concurrent=0`，按 CPU 及内存预算自动选择并发，额外的处理请求在当前 HTTP 连接中有界等待；当前 8 核/8 GiB 主机给处理器 6 GiB，自动得到 5 个并发。透传（含上传）不占编码名额。没有业务轮询、同步、自动重试或重启循环。`docker compose stop` 仅停止本目录服务；不删除共享网络或 MinIO 卷。
 
-网关不记录含签名 URI 的 access/error 日志；启动配置错误仍可见。处理器保留脱敏阶段和终态日志，不输出源地址或凭据。固定 MinIO 社区版本的桶 CORS 是空实现，因此 CORS 由 Nginx 精确管理：只允许配置的 GUI origin、GET/HEAD/PUT 和必要请求头，并清除上游宽泛 CORS。generated/cors.xml 仅供支持该功能的其他 S3 服务参考。
+存活检查经网关打到 MinIO 自己的健康端点：`curl -fsS http://image-processor:8080/minio/health/live`（同网络容器内），同时证明网关与上游都可用；网关不占用任何对象路径做自己的健康端点。
+
+网关和 Nginx 都不记录含签名的 URI；启动配置错误仍可见。处理器保留脱敏阶段和终态日志，不输出路径、Host 或凭据。固定 MinIO 社区版本的桶 CORS 是空实现，因此 CORS 由 Nginx 精确管理：只允许配置的 GUI origin、GET/HEAD/PUT 和 EasOS File 需要的请求头，暴露 ETag、Content-Range、X-Image-Cache 等，并清除上游宽泛 CORS。对象自带的 Cache-Control、Content-Disposition 原样到达浏览器，入口不改写。generated/cors.xml 仅供支持桶 CORS 的其他 S3 服务参考。
+
+### 从 8443 旧版升级
+
+旧版把图片处理放在单独的 8443 端口，接口是 `/?url=…&w=…`；EasOS 已改为三种存储拼同一条 OSS 处理串、下载域名即网关入口，旧接口已删除。已有部署按下面替换，不重跑 bootstrap、不动 MinIO：
+
+1. `generated/config.toml` 改成 `config.example.toml` 的结构（`listen`、`upstream = "http://minio:9000"`、`max_concurrent`、`fetch_timeout_seconds`），旧的 `sources`、`allowed_origins`、`max_input_*` 会让新版拒绝启动。
+2. `generated/nginx.conf` 按 `scripts/prepare.py` 当前生成的内容改为单个 443：专用桶的两个 location 改为 `proxy_pass http://image-processor:8080`，删除 8443 server 和强制 `Cache-Control: no-store`，`client_max_body_size 0`，CORS 请求头与暴露头补齐。可在空目录运行一次 prepare.py 取得模板，凭据仍用现有 secrets。
+3. 拉取新代码后 `docker compose build image-processor && docker compose up -d image-processor gateway`，再 `docker compose run --rm --no-deps --entrypoint nginx gateway -t` 校验配置。
+4. EasOS 侧：桶配置删掉图片处理地址（EasOS 升级时自动清除），下载域名保持 `33.79.0.35`。
+
+### 已发布对象的匿名读取（待决定）
+
+EasOS File 发布对象时先匿名 HEAD 探测，不通才对 MinIO 发 `PUT ?acl`（`x-amz-acl: public-read`）。MinIO 不支持对象级 ACL：本地实测 MinIO（RELEASE.2025-10-15 源码构建）对该请求返回 501 `NotImplemented`，之后匿名读取仍是 403，所以在当前私有桶上发布会失败。要让 EasOS 在 MinIO 上发布成功，只能给对象前缀加桶级匿名只读策略（例如 `mc anonymous set download storage/easos-preview/easos`），代价是同前缀下尚未发布的对象只要知道对象名也能匿名读取。bootstrap 不会自动加这条策略，是否接受由使用者决定。
 
 ## HTTPS 与真实 S3 验收
 
@@ -44,14 +58,14 @@ docker compose up -d image-processor gateway
 python3 -m venv .venv
 .venv/bin/pip install -r scripts/requirements-smoke.txt
 .venv/bin/python scripts/smoke.py \
-  --storage https://33.79.0.35 --processor https://33.79.0.35:8443 \
+  --storage https://33.79.0.35 \
   --bucket easos-preview --gui-origin http://127.0.0.1:18080 \
   --access-key-file deploy/https/secrets/access_key \
   --secret-key-file deploy/https/secrets/secret_key \
   --ca-file deploy/https/tls/ca.crt
 ```
 
-实测条件 PUT/412、MD5 拒绝、HEAD/GET 一致性、匿名/篡改签名拒绝、允许和拒绝来源的 CORS、管理路径隔离、21组静态格式/缩放转换、缓存HIT/签名拒绝和任意来源拒绝。TLS 始终验证证书链、有效期和主机/IP；企业根 CA 缺少 KeyUsage，Python helper 使用常规 TLS 客户端验证，不额外启用 Python 3.13 的严格 X.509 扩展检查，不使用跳过证书验证。
+经网关检查条件 PUT/412、MD5 拒绝、签名读取与上传字节一致、Range/HEAD/304、匿名与篡改签名拒绝、允许和拒绝来源的 CORS、管理路径隔离；EasOS 的两条处理串各取两次（尺寸不同、`X-Image-Cache` 先 MISS 后 HIT、ETag 沿用原对象）；签名后再追加处理串被拒；OSS 参数错误码。已给某前缀配好匿名只读时加 `--public-prefix <前缀>/` 核对匿名读取与加工。TLS 始终验证证书链、有效期和主机/IP；企业根 CA 缺少 KeyUsage，Python helper 使用常规 TLS 客户端验证，不额外启用 Python 3.13 的严格 X.509 扩展检查，不跳过证书验证。
 
 ## 独立 EasOS 配置
 
@@ -63,6 +77,6 @@ python3 scripts/preview.py trust-ca --certificate /Users/pch18/Codes/ca/root/roo
 
 只把公开根 CA 放进容器信任库，私钥留在远端 Nginx。预览脚本保留根 CA 副本，重建后重新安装。
 
-File 新桶 key 为 `minio_preview`，provider=MinIO、bucket=easos-preview、region=us-east-1、path_style=true；server/upload/download 的 host 均为 `33.79.0.35`、HTTPS 开启，image_processor host 为 `33.79.0.35:8443`、HTTPS 开启。host 不含协议或路径，加速地址留空。凭据取专用应用文件，在安全通道配置，不写入文档、聊天或命令日志。
+File 桶 key 为 `minio_preview`，provider=MinIO、bucket=easos-preview、region=us-east-1、path_style=true；server/upload/download 的 host 均为 `33.79.0.35`、HTTPS 开启。host 不含协议或路径。没有单独的图片处理地址：MinIO 的下载域名就是网关入口。凭据取专用应用文件，在安全通道配置，不写入文档、聊天或命令日志。示例见 `generated/easos-bucket.example.toml`。
 
-默认桶和已有模块的新上传分配到新桶。历史记录保留原 bucket_key，旧桶配置不能删除或改类型/桶名。此前约 18.6 GB 本地附件副本按要求删除，业务数据库保留；未复制的旧图不会因切换新桶恢复。验收范围见 [验收记录](../../docs/verification.md)。
+默认桶和已有模块的新上传分配到新桶。历史记录保留原 bucket_key，旧桶配置不能删除或改类型/桶名。验收范围见 [验收记录](../../docs/verification.md)。

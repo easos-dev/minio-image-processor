@@ -1,14 +1,7 @@
 listen = "0.0.0.0:8080"
-allowed_origins = ["http://127.0.0.1:18080"]
-max_input_bytes = 104857600
-max_input_pixels = 250000000
-# 0：按实际CPU和容器内存自动计算；正整数仍受内存预算约束。
-max_concurrent = 0
-fetch_timeout_seconds = 20
-
-[[sources]]
-# url 参数必须属于该公开 origin 和桶前缀。
-origin = "https://33.79.0.35"
-# 固定受信容器回源；仍使用原始公开 Host，使 SigV4 签名有效。
+# 可信上游 origin：网关把所有请求原样转给它。同网络 MinIO 用容器内地址，不经公网。
 upstream = "http://minio:9000"
-path_prefix = "/easos-preview/"
+# 0：按实际 CPU 和容器内存自动计算；正整数仍受内存预算约束。
+max_concurrent = 0
+# 处理路径取原图的总时限（秒）；透传路径不受此限。
+fetch_timeout_seconds = 20

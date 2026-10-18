@@ -1,10 +1,8 @@
-//! 实际执行成功、失败和取消路径，核对终态关联以及签名/正文不进入日志。
+//! 实际执行成功、上游拒绝、参数错误和取消路径，核对终态关联，以及路径、查询串、签名、Host 与
+//! 正文都不进入日志。加工部分需要目标 Linux 的 image-worker。
 use axum::{Router, body::Body, http::Request, routing::get};
 use image::{DynamicImage, ImageFormat};
-use image_processor::{
-    config::{Config, Source},
-    web,
-};
+use image_processor::{config::Config, web};
 use std::{
     io::{Cursor, Write},
     sync::{Arc, Mutex},
@@ -29,16 +27,18 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
         self.clone()
     }
 }
-fn request(path: &str) -> Request<Body> {
-    let url =
-        format!("https://objects.example.test/bucket/{path}?X-Amz-Signature=DO_NOT_LOG_SIGNATURE");
-    let query = serde_urlencoded::to_string([("url", url)]).unwrap();
+/// 带签名、Host 与 Authorization 的请求；这些值都不允许出现在日志里。
+fn request(path: &str, process: &str) -> Request<Body> {
     Request::builder()
-        .uri(format!("/?{query}&f=png"))
+        .uri(format!(
+            "/bucket/{path}?x-oss-process={process}&X-Amz-Signature=DO_NOT_LOG_SIGNATURE"
+        ))
+        .header("host", "objects.example.test")
         .header("authorization", "Bearer DO_NOT_LOG_BEARER")
         .body(Body::empty())
         .unwrap()
 }
+
 #[tokio::test]
 async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
     let buffer = Buffer(Arc::new(Mutex::new(Vec::new())));
@@ -65,7 +65,7 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
             "/bucket/ok",
             get(move || {
                 let pixels = pixels.clone();
-                async move { pixels }
+                async move { ([("etag", "\"e\"")], pixels) }
             }),
         )
         .route(
@@ -86,34 +86,38 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
     });
     let app = web::app(Config {
         listen: "127.0.0.1:0".parse().unwrap(),
-        allowed_origins: vec!["http://127.0.0.1:18080".into()],
-        sources: vec![Source {
-            origin: "https://objects.example.test".into(),
-            upstream: format!("http://{address}"),
-            path_prefix: "/bucket/".into(),
-        }],
-        max_input_bytes: 10000,
-        max_input_pixels: 10000,
+        upstream: format!("http://{address}"),
         max_concurrent: 1,
         fetch_timeout_seconds: 5,
     })
     .unwrap();
-    assert_eq!(
-        app.clone().oneshot(request("ok")).await.unwrap().status(),
-        200
-    );
+    let ok = app
+        .clone()
+        .oneshot(request("ok", "image/format,png"))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    // 上游 404 原样转发；参数错误在回源前返回。
     assert_eq!(
         app.clone()
-            .oneshot(request("missing"))
+            .oneshot(request("missing", "image/format,png"))
             .await
             .unwrap()
             .status(),
-        502
+        404
     );
-    let cancellation = tokio::spawn(app.clone().oneshot(request("cancel")));
+    assert_eq!(
+        app.clone()
+            .oneshot(request("ok", "image/resize,w_abc"))
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let cancellation = tokio::spawn(app.clone().oneshot(request("cancel", "image/format,png")));
     entered.notified().await;
-    // 工作名额被占用时取消等待者，须有queue阶段终态且不触发额外回源。
-    let queued = tokio::spawn(app.oneshot(request("ok")));
+    // 名额被占用时取消等待者，须有 queue 阶段终态且不触发额外回源。
+    let queued = tokio::spawn(app.oneshot(request("ok", "image/format,png")));
     tokio::task::yield_now().await;
     queued.abort();
     assert!(queued.await.unwrap_err().is_cancelled());
@@ -121,8 +125,15 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
     assert!(cancellation.await.unwrap_err().is_cancelled());
     server_task.abort();
     let log = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
-    for secret in ["DO_NOT_LOG", "X-Amz", "objects.example.test", "/bucket/"] {
-        assert!(!log.contains(secret));
+    for secret in [
+        "DO_NOT_LOG",
+        "X-Amz",
+        "objects.example.test",
+        "/bucket/",
+        "x-oss-process",
+        "w_abc",
+    ] {
+        assert!(!log.contains(secret), "{secret}");
     }
     let entries: Vec<serde_json::Value> = log
         .lines()
@@ -136,8 +147,8 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
         .iter()
         .filter(|e| e["fields"]["event"] == "request_end")
         .collect();
-    assert_eq!(starts.len(), 4);
-    assert_eq!(ends.len(), 4);
+    assert_eq!(starts.len(), 5);
+    assert_eq!(ends.len(), 5);
     for start in starts {
         assert_eq!(
             ends.iter()
@@ -149,6 +160,13 @@ async fn success_failure_and_cancellation_have_correlated_safe_terminal_logs() {
     assert!(
         ends.iter()
             .any(|e| e["fields"]["status"] == "cancelled" && e["fields"]["stage"] == "queue")
+    );
+    assert!(ends.iter().any(|e| e["fields"]["status"] == "failed"
+        && e["fields"]["code"] == "InvalidArgument"
+        && e["fields"]["ec"] == "0040-00000312"));
+    assert!(
+        ends.iter()
+            .any(|e| e["fields"]["status"] == "ok" && e["fields"]["http_status"] == 404)
     );
     for status in ["ok", "failed", "cancelled"] {
         assert!(ends.iter().any(|e| e["fields"]["status"] == status));
