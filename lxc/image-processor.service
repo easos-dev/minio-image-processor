@@ -1,0 +1,23 @@
+[Unit]
+Description=MinIO 前置图片处理网关
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/image-processor
+Environment=IMAGE_PROCESSOR_CONFIG=/etc/image-processor/config.toml
+# 与 Docker 镜像一样以 nobody 运行，不创建专用账号。
+User=nobody
+Group=nogroup
+Restart=on-failure
+RestartSec=3
+# 与 Docker 部署（read_only、cap_drop ALL、no-new-privileges、tmpfs /tmp）同样的收紧：网关只往 /tmp 写。
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

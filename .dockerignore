@@ -6,3 +6,7 @@
 !Dockerfile
 !native/
 !native/**
+# LXC 模板（lxc/Dockerfile）还要用到的文件。
+!lxc/
+!lxc/**
+!config.example.toml
